@@ -1,0 +1,31 @@
+[project]
+name = "pentaia-v2"
+version = "0.1.0"
+description = "AI-assisted penetration testing agent built with LangGraph, LangChain, Gemini, and Kali Linux."
+authors = [
+    { name = "Israr", email = "iahmad@live.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "langchain>=1.3.18",
+    "langchain-google-genai>=4.3.7",
+    "langgraph>=1.2.11",
+    "paramiko>=5.0.0",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+pentaia = "pentaia:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pentaia"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
