@@ -2,6 +2,9 @@ import ipaddress
 from urllib.parse import urlsplit, urlunsplit
 
 
+UNSAFE_NUCLEI_TARGET_CHARS = set(";|&`$<>")
+
+
 def validate_ipv4(target: str) -> str:
     try:
         address = ipaddress.ip_address(target)
@@ -22,6 +25,9 @@ def validate_nuclei_target(target: str) -> str:
 
     if any(char.isspace() for char in target):
         raise ValueError("Nuclei target must not contain whitespace.")
+
+    if any(char in UNSAFE_NUCLEI_TARGET_CHARS for char in target):
+        raise ValueError("Nuclei target contains unsafe characters.")
 
     if "://" not in target:
         return validate_ipv4(target)
