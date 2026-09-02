@@ -11,9 +11,22 @@ def nmap_service_scan(target: str) -> str:
     The input must be a single IPv4 address.
     """
 
-    stdout, stderr, exit_code = nmap_scan(target)
+    try:
+        stdout, stderr, exit_code = nmap_scan(target)
+
+    except ValueError as exc:
+        return f"Target validation failed: {exc}"
+
+    except RuntimeError as exc:
+        return f"Nmap execution failed: {exc}"
 
     if exit_code != 0:
-        return f"Nmap failed with exit code {exit_code}.\n{stderr}"
+        return (
+            f"Nmap failed with exit code {exit_code}.\n"
+            f"{stderr or 'No error output was returned.'}"
+        )
+
+    if not stdout:
+        return "Nmap completed but returned no output."
 
     return stdout

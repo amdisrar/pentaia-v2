@@ -1,4 +1,5 @@
 import os
+import socket
 
 import paramiko
 from dotenv import load_dotenv
@@ -16,26 +17,39 @@ def run_command(command: str, timeout: int = 30) -> tuple[str, str, int]:
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(
-            hostname=host,
-            port=port,
-            username=username,
-            key_filename=key_path,
-            timeout=10,
-        )
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                key_filename=key_path,
+                timeout=10,
+            )
+        except paramiko.AuthenticationException as exc:
+            raise RuntimeError("Kali SSH authentication failed.") from exc
+        except (paramiko.SSHException, socket.error, TimeoutError) as exc:
+            raise RuntimeError(
+                f"Unable to connect to Kali at {host}:{port}."
+            ) from exc
 
-        stdin, stdout, stderr = client.exec_command(
-            command,
-            timeout=timeout,
-        )
+        try:
+            _, stdout, stderr = client.exec_command(
+                command,
+                timeout=timeout,
+            )
 
-        exit_code = stdout.channel.recv_exit_status()
+            exit_code = stdout.channel.recv_exit_status()
 
-        return (
-            stdout.read().decode().strip(),
-            stderr.read().decode().strip(),
-            exit_code,
-        )
+            return (
+                stdout.read().decode().strip(),
+                stderr.read().decode().strip(),
+                exit_code,
+            )
+
+        except socket.timeout as exc:
+            raise RuntimeError(
+                f"Remote command timed out after {timeout} seconds."
+            ) from exc
 
     finally:
         client.close()

@@ -61,6 +61,10 @@ def main() -> None:
 
             print(f"{final_message.text}\n")
 
+        
+        except Exception as exc:
+            print(f"\nPentAiA error: {exc}\n")
+
         except KeyboardInterrupt:
-            print("\nGoodbye.")
-            break
+                    print("\nGoodbye.")
+                    break
