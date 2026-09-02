@@ -2,6 +2,9 @@ import itertools
 import sys
 import threading
 import time
+import logging
+
+from pentaia.logging_config import setup_logging
 
 from langchain_core.messages import HumanMessage
 
@@ -20,7 +23,15 @@ def show_spinner(stop_event: threading.Event) -> None:
     sys.stdout.flush()
 
 
+
+
 def main() -> None:
+
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    logger.info("PentAiA started")
+
     print("PentAiA v2")
     print("Type 'exit' or 'quit' to stop.\n")
 
@@ -32,6 +43,7 @@ def main() -> None:
                 continue
 
             if user_input.lower() in {"exit", "quit"}:
+                logger.info("PentAiA stopped")
                 print("Goodbye.")
                 break
 
@@ -62,9 +74,11 @@ def main() -> None:
             print(f"{final_message.text}\n")
 
         
-        except Exception as exc:
-            print(f"\nPentAiA error: {exc}\n")
+        except Exception:
+            logger.exception("Unhandled PentAiA error")
+            print("\nPentAiA encountered an error. Check logs/pentaia.log for details.\n")
 
         except KeyboardInterrupt:
-                    print("\nGoodbye.")
-                    break
+            logger.info("PentAiA stopped by user")
+            print("\nGoodbye.")
+            break

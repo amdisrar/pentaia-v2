@@ -2,6 +2,9 @@ from langchain_core.tools import tool
 
 from pentaia.nmap_wrapper import nmap_scan
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 @tool
 def nmap_service_scan(target: str) -> str:
@@ -10,6 +13,7 @@ def nmap_service_scan(target: str) -> str:
     Use this tool only for authorized lab systems.
     The input must be a single IPv4 address.
     """
+    logger.info("Tool selected: nmap_service_scan target=%s", target)
 
     try:
         stdout, stderr, exit_code = nmap_scan(target)
