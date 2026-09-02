@@ -3,6 +3,7 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
+from pentaia.findings import findings_to_json, parse_nuclei_jsonl
 from pentaia.nmap_wrapper import nmap_scan
 from pentaia.nuclei_wrapper import nuclei_scan
 
@@ -60,6 +61,8 @@ def nuclei_vulnerability_scan(
     the user's request. If the user does not specify severity, use critical.
     PentAiA validates all severity values and does not allow arbitrary Nuclei
     command-line options.
+
+    Returns compact normalized JSON findings for reliable downstream analysis.
     """
     logger.info(
         "Tool selected: nuclei_vulnerability_scan target=%s severities=%s",
@@ -85,4 +88,9 @@ def nuclei_vulnerability_scan(
     if not stdout:
         return "Nuclei completed successfully and returned no vulnerability findings."
 
-    return stdout
+    try:
+        findings = parse_nuclei_jsonl(stdout)
+    except ValueError as exc:
+        return f"Nuclei returned output that could not be parsed: {exc}"
+
+    return findings_to_json(findings)
