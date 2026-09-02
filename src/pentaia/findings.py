@@ -1,6 +1,24 @@
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
+from urllib.parse import urlsplit
+
+
+KNOWN_SERVICES = {
+    21: "ftp",
+    22: "ssh",
+    25: "smtp",
+    53: "dns",
+    80: "http",
+    110: "pop3",
+    139: "netbios-ssn",
+    143: "imap",
+    443: "https",
+    445: "smb",
+    3306: "mysql",
+    5432: "postgresql",
+    8009: "ajp",
+}
 
 
 @dataclass(frozen=True)
@@ -43,6 +61,55 @@ def _normalize_cvss(classification: dict[str, Any]) -> float | None:
         return None
 
 
+def _matched_port(record: dict[str, Any]) -> int | None:
+    matched_at = str(record.get("matched-at") or "")
+
+    if matched_at.startswith(("http://", "https://")):
+        parsed = urlsplit(matched_at)
+        if parsed.port is not None:
+            return parsed.port
+        return 443 if parsed.scheme == "https" else 80
+
+    if ":" in matched_at:
+        candidate = matched_at.rsplit(":", 1)[-1]
+        try:
+            return int(candidate)
+        except ValueError:
+            pass
+
+    port = record.get("port")
+    try:
+        return int(port) if port is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_protocol(record: dict[str, Any], port: int | None) -> str | None:
+    matched_at = str(record.get("matched-at") or "")
+    scheme = record.get("scheme")
+
+    if matched_at.startswith(("http://", "https://")) or scheme in {"http", "https"}:
+        return "tcp"
+
+    nuclei_type = str(record.get("type") or "").lower()
+    if nuclei_type in {"tcp", "network", "javascript"} or port is not None:
+        return "tcp"
+
+    return nuclei_type or None
+
+
+def _normalize_service(record: dict[str, Any], port: int | None) -> str | None:
+    matched_at = str(record.get("matched-at") or "")
+    scheme = record.get("scheme")
+
+    if matched_at.startswith("https://") or scheme == "https":
+        return "https"
+    if matched_at.startswith("http://") or scheme == "http":
+        return "http"
+
+    return KNOWN_SERVICES.get(port) if port is not None else None
+
+
 def _build_evidence(record: dict[str, Any]) -> str:
     matched_at = record.get("matched-at")
     response = record.get("response") or ""
@@ -63,20 +130,13 @@ def _build_evidence(record: dict[str, Any]) -> str:
 def parse_nuclei_record(record: dict[str, Any]) -> VulnerabilityFinding:
     info = record.get("info") or {}
     classification = info.get("classification") or {}
-
-    port = record.get("port")
-    try:
-        normalized_port = int(port) if port is not None else None
-    except (TypeError, ValueError):
-        normalized_port = None
-
-    protocol = record.get("type")
+    port = _matched_port(record)
 
     return VulnerabilityFinding(
         target=str(record.get("host") or record.get("url") or ""),
-        port=normalized_port,
-        protocol=str(protocol) if protocol is not None else None,
-        service=str(record.get("scheme")) if record.get("scheme") else None,
+        port=port,
+        protocol=_normalize_protocol(record, port),
+        service=_normalize_service(record, port),
         template_id=str(record.get("template-id") or ""),
         title=str(info.get("name") or record.get("template-id") or "Unknown finding"),
         severity=str(info.get("severity") or "unknown").lower(),
