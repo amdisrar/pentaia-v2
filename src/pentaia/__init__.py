@@ -1,32 +1,40 @@
-import itertools
+import logging
 import sys
 import threading
 import time
-import logging
-
-from pentaia.logging_config import setup_logging
 
 from langchain_core.messages import HumanMessage
 
 from pentaia.graph import graph
+from pentaia.logging_config import setup_logging
 
 
 def show_spinner(stop_event: threading.Event) -> None:
-    spinner = itertools.cycle("|/-\\")
+    track_width = 18
+    position = 0
+    direction = 1
 
     while not stop_event.is_set():
-        sys.stdout.write(f"\rPentAiA is working... {next(spinner)}")
-        sys.stdout.flush()
-        time.sleep(0.1)
+        snake = "~~~>" if direction > 0 else "<~~~"
+        frame = " " * position + snake
+        frame = frame.ljust(track_width + len(snake))
 
-    sys.stdout.write("\r" + " " * 40 + "\r")
+        sys.stdout.write(f"\rPentAiA is working... {frame}")
+        sys.stdout.flush()
+        time.sleep(0.12)
+
+        if position >= track_width:
+            direction = -1
+        elif position <= 0:
+            direction = 1
+
+        position += direction
+
+    sys.stdout.write("\r" + " " * 60 + "\r")
     sys.stdout.flush()
 
 
-
-
 def main() -> None:
-
     setup_logging()
     logger = logging.getLogger(__name__)
 
@@ -73,10 +81,12 @@ def main() -> None:
 
             print(f"{final_message.text}\n")
 
-        
         except Exception:
             logger.exception("Unhandled PentAiA error")
-            print("\nPentAiA encountered an error. Check logs/pentaia.log for details.\n")
+            print(
+                "\nPentAiA encountered an error. "
+                "Check logs/pentaia.log for details.\n"
+            )
 
         except KeyboardInterrupt:
             logger.info("PentAiA stopped by user")
