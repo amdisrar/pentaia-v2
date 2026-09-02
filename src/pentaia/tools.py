@@ -5,9 +5,11 @@ from typing import Literal
 from langchain_core.tools import tool
 
 from pentaia.findings import findings_to_json, parse_nuclei_jsonl
+from pentaia.logging_config import setup_logging
 from pentaia.nmap_wrapper import nmap_scan
 from pentaia.nuclei_wrapper import nuclei_scan
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 NucleiSeverity = Literal[
