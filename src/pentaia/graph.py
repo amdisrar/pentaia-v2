@@ -2,6 +2,7 @@ import json
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -219,4 +220,7 @@ graph_builder.add_edge("rejection", "agent")
 graph_builder.add_edge("stale", "agent")
 graph_builder.add_edge("tools", "agent")
 
-graph = graph_builder.compile()
+# The in-memory checkpointer preserves one CLI conversation by LangGraph thread_id.
+# The CLI owns that thread/session identifier; it is never exposed to the model.
+checkpointer = InMemorySaver()
+graph = graph_builder.compile(checkpointer=checkpointer)
