@@ -7,6 +7,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from pentaia.approval import Phase3ApprovalState
 from pentaia.llm import get_llm
+from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
 
@@ -37,7 +38,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "For Phase 3, use phase3_controlled_validation only for a code-owned supported validation action that is "
         "traceable to normalized Phase 2 evidence. The exact proposal must already have explicit human approval. "
         "Approval is injected from graph state and is not a parameter you can provide or modify. "
-        "If approval is missing, stale, rejected, or the target is not authorized, the tool must remain blocked."
+        "If approval is missing, stale, rejected, or the target is not authorized, the tool must remain blocked. "
+        + PHASE3_INTERPRETATION_RULES
     )
 )
 
