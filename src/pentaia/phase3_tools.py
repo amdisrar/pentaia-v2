@@ -7,6 +7,7 @@ from langgraph.prebuilt import InjectedState
 
 from pentaia.approval import Phase3ActionProposal, Phase3ApprovalState
 from pentaia.metasploit_wrapper import run_metasploit_action
+from pentaia.phase3_results import normalize_phase3_result
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ def _response(
     action_id: str,
     target: str,
     result: dict | None = None,
+    normalized_result: dict | None = None,
     error: str | None = None,
 ) -> str:
     payload = {
@@ -27,6 +29,7 @@ def _response(
         "action_id": action_id,
         "target": target,
         "result": result,
+        "normalized_result": normalized_result,
         "error": error,
     }
     return json.dumps(payload, sort_keys=True)
@@ -65,10 +68,17 @@ def _run_phase3_validation_tool(
             target,
             exc,
         )
+        normalized = normalize_phase3_result(
+            proposal=proposal,
+            approval=approval,
+            tool_status="blocked",
+            error=str(exc),
+        )
         return _response(
             status="blocked",
             action_id=action_id,
             target=target,
+            normalized_result=normalized.to_dict(),
             error=str(exc),
         )
     except RuntimeError as exc:
@@ -78,19 +88,33 @@ def _run_phase3_validation_tool(
             target,
             exc,
         )
+        normalized = normalize_phase3_result(
+            proposal=proposal,
+            approval=approval,
+            tool_status="error",
+            error=str(exc),
+        )
         return _response(
             status="error",
             action_id=action_id,
             target=target,
+            normalized_result=normalized.to_dict(),
             error=str(exc),
         )
 
     status = "success" if result.exit_code == 0 else "failed"
+    normalized = normalize_phase3_result(
+        proposal=proposal,
+        approval=approval,
+        tool_status=status,
+        execution_result=result,
+    )
     return _response(
         status=status,
         action_id=action_id,
         target=target,
         result=result.to_dict(),
+        normalized_result=normalized.to_dict(),
     )
 
 
@@ -114,7 +138,8 @@ def phase3_controlled_validation(
     model-controlled argument. Target authorization, exact approval matching,
     and typed parameter validation are re-checked before any state change.
 
-    Returns structured JSON with status, action context, result, and error fields.
+    Returns structured JSON containing both raw execution context and a conservative
+    normalized result for downstream interpretation.
     """
     return _run_phase3_validation_tool(
         action_id=action_id,
