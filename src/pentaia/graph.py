@@ -99,6 +99,14 @@ def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
     )
 
 
+def _pending_call_matches_approval(state: AgentState) -> bool:
+    approval = state.get("pending_approval")
+    calls = _state_changing_calls(state)
+    if approval is None or len(calls) != 1:
+        return False
+    return _proposal_from_tool_call(calls[0]).signature() == approval.proposal.signature()
+
+
 def approval_gate_node(state: AgentState) -> AgentState:
     calls = _state_changing_calls(state)
     if len(calls) != 1:
@@ -113,7 +121,7 @@ def approval_gate_node(state: AgentState) -> AgentState:
 def rejection_node(state: AgentState) -> AgentState:
     message = _last_ai_message(state)
     if message is None or not message.tool_calls:
-        return {"messages": []}
+        return {"messages": [], "pending_approval": None}
 
     tool_messages = []
     for call in message.tool_calls:
@@ -136,10 +144,33 @@ def rejection_node(state: AgentState) -> AgentState:
     return {"messages": tool_messages, "pending_approval": None}
 
 
+def stale_approval_node(state: AgentState) -> AgentState:
+    message = _last_ai_message(state)
+    if message is None or not message.tool_calls:
+        return {"messages": [], "pending_approval": None}
+
+    tool_messages = [
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "stale_approval",
+                    "message": "The approval does not match the current pending proposal. Nothing was executed.",
+                },
+                sort_keys=True,
+            ),
+            tool_call_id=call["id"],
+            name=call.get("name"),
+        )
+        for call in message.tool_calls
+    ]
+    return {"messages": tool_messages, "pending_approval": None}
+
+
 def route_from_start(state: AgentState) -> str:
     approval = state.get("pending_approval")
     if approval is not None and approval.decision == "approved":
-        return "tools"
+        return "tools" if _pending_call_matches_approval(state) else "stale"
     if approval is not None and approval.decision == "rejected":
         return "rejection"
     return "agent"
@@ -159,6 +190,7 @@ graph_builder = StateGraph(AgentState)
 graph_builder.add_node("agent", agent_node)
 graph_builder.add_node("approval_gate", approval_gate_node)
 graph_builder.add_node("rejection", rejection_node)
+graph_builder.add_node("stale", stale_approval_node)
 graph_builder.add_node("tools", ToolNode(tools))
 
 graph_builder.add_conditional_edges(
@@ -168,6 +200,7 @@ graph_builder.add_conditional_edges(
         "agent": "agent",
         "tools": "tools",
         "rejection": "rejection",
+        "stale": "stale",
     },
 )
 
@@ -183,6 +216,7 @@ graph_builder.add_conditional_edges(
 
 graph_builder.add_edge("approval_gate", END)
 graph_builder.add_edge("rejection", "agent")
+graph_builder.add_edge("stale", "agent")
 graph_builder.add_edge("tools", "agent")
 
 graph = graph_builder.compile()
