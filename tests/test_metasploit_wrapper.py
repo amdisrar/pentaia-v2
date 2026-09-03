@@ -35,11 +35,49 @@ def _approved(proposal: Phase3ActionProposal):
     )
 
 
+def test_prepare_parameters_resolves_runtime_callback_before_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+
+    parameters = metasploit_wrapper.prepare_metasploit_parameters(
+        "validate_vsftpd_234_backdoor",
+        {"rport": 21},
+    )
+
+    assert parameters == {"rport": 21, "lhost": "172.16.0.13"}
+
+
+def test_prepare_parameters_fails_closed_when_callback_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PENTAIA_LHOST", raising=False)
+
+    with pytest.raises(ValueError, match="PENTAIA_LHOST is required"):
+        metasploit_wrapper.prepare_metasploit_parameters(
+            "validate_vsftpd_234_backdoor",
+            {"rport": 21},
+        )
+
+
+def test_prepare_parameters_rejects_invalid_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PENTAIA_LHOST", "not-an-ip")
+
+    with pytest.raises(ValueError, match="valid IPv4"):
+        metasploit_wrapper.prepare_metasploit_parameters(
+            "validate_vsftpd_234_backdoor",
+            {"rport": 21},
+        )
+
+
 def test_approved_authorized_action_invokes_exact_predefined_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
     monkeypatch.delenv("PENTAIA_PHASE3_DENYLIST", raising=False)
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
 
     captured: dict[str, object] = {}
 
@@ -72,6 +110,56 @@ def test_approved_authorized_action_invokes_exact_predefined_module(
     assert "set RPORT 21" in command
     assert "set LHOST 172.16.0.13" in command
     assert "run" in command
+
+
+def test_runtime_callback_change_after_approval_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+
+    called = False
+
+    def fake_run_command(command: str, timeout: int):
+        nonlocal called
+        called = True
+        return "", "", 0
+
+    monkeypatch.setattr(metasploit_wrapper, "run_command", fake_run_command)
+
+    proposal = _proposal()
+    approval = _approved(proposal)
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.14")
+
+    with pytest.raises(ValueError, match="approval is stale"):
+        metasploit_wrapper.run_metasploit_action(proposal, approval)
+
+    assert called is False
+
+
+def test_runtime_callback_missing_after_approval_blocks_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+
+    called = False
+
+    def fake_run_command(command: str, timeout: int):
+        nonlocal called
+        called = True
+        return "", "", 0
+
+    monkeypatch.setattr(metasploit_wrapper, "run_command", fake_run_command)
+
+    proposal = _proposal()
+    approval = _approved(proposal)
+    monkeypatch.delenv("PENTAIA_LHOST")
+
+    with pytest.raises(ValueError, match="PENTAIA_LHOST is required"):
+        metasploit_wrapper.run_metasploit_action(proposal, approval)
+
+    assert called is False
 
 
 def test_missing_approval_blocks_before_remote_execution(
