@@ -7,6 +7,12 @@ from langgraph.prebuilt import InjectedState
 
 from pentaia.approval import Phase3ActionProposal, Phase3ApprovalState
 from pentaia.metasploit_wrapper import prepare_metasploit_parameters, run_metasploit_action
+from pentaia.phase3_audit import (
+    audit_failure,
+    audit_proposal,
+    audit_result,
+    user_safe_failure_message,
+)
 from pentaia.phase3_results import normalize_phase3_result
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,20 @@ def _base_proposal(
     )
 
 
+def _runtime_failure_category(exc: RuntimeError) -> str:
+    message = str(exc).lower()
+    if "timed out" in message or "timeout" in message:
+        return "timeout"
+    if (
+        "unavailable" in message
+        or "unable to connect" in message
+        or "authentication failed" in message
+        or "missing kali connection configuration" in message
+    ):
+        return "unavailable"
+    return "execution"
+
+
 def _run_phase3_validation_tool(
     *,
     action_id: Phase3ActionId,
@@ -88,46 +108,65 @@ def _run_phase3_validation_tool(
             expected_effect=expected_effect,
             parameters=parameters,
         )
+        audit_proposal(proposal, approval)
         result = run_metasploit_action(proposal, approval)
     except ValueError as exc:
+        proposal_for_audit = locals().get("proposal", base_proposal)
         logger.warning(
-            "Phase 3 LangChain tool blocked action_id=%s target=%s error=%s",
+            "Phase 3 LangChain tool blocked action_id=%s target=%s error_type=%s",
             action_id,
             target,
-            exc,
+            type(exc).__name__,
+        )
+        audit_failure(
+            proposal_for_audit,
+            approval,
+            category="blocked",
+            error=exc,
         )
         normalized = normalize_phase3_result(
-            proposal=base_proposal,
+            proposal=proposal_for_audit,
             approval=approval,
             tool_status="blocked",
             error=str(exc),
         )
+        audit_result(normalized)
         return _response(
             status="blocked",
             action_id=action_id,
             target=target,
             normalized_result=normalized.to_dict(),
-            error=str(exc),
+            error=user_safe_failure_message("blocked"),
         )
     except RuntimeError as exc:
+        proposal_for_audit = locals().get("proposal", base_proposal)
+        category = _runtime_failure_category(exc)
         logger.error(
-            "Phase 3 LangChain tool failed action_id=%s target=%s error=%s",
+            "Phase 3 LangChain tool failed action_id=%s target=%s category=%s error_type=%s",
             action_id,
             target,
-            exc,
+            category,
+            type(exc).__name__,
+        )
+        audit_failure(
+            proposal_for_audit,
+            approval,
+            category=category,
+            error=exc,
         )
         normalized = normalize_phase3_result(
-            proposal=proposal,
+            proposal=proposal_for_audit,
             approval=approval,
             tool_status="error",
             error=str(exc),
         )
+        audit_result(normalized)
         return _response(
             status="error",
             action_id=action_id,
             target=target,
             normalized_result=normalized.to_dict(),
-            error=str(exc),
+            error=user_safe_failure_message(category),
         )
 
     status = "success" if result.exit_code == 0 else "failed"
@@ -137,6 +176,7 @@ def _run_phase3_validation_tool(
         tool_status=status,
         execution_result=result,
     )
+    audit_result(normalized)
     return _response(
         status=status,
         action_id=action_id,
