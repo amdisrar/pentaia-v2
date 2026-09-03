@@ -1,15 +1,22 @@
+import json
 from typing import Annotated, NotRequired, TypedDict
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
-from pentaia.approval import Phase3ApprovalState
+from pentaia.approval import (
+    Phase3ActionProposal,
+    Phase3ApprovalState,
+    create_pending_approval,
+)
 from pentaia.llm import get_llm
 from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
+
+STATE_CHANGING_TOOL_NAME = "phase3_controlled_validation"
 
 SYSTEM_MESSAGE = SystemMessage(
     content=(
@@ -59,31 +66,123 @@ llm = get_llm().bind_tools(tools)
 
 
 def agent_node(state: AgentState) -> AgentState:
-    response = llm.invoke(
-        [SYSTEM_MESSAGE, *state["messages"]]
+    response = llm.invoke([SYSTEM_MESSAGE, *state["messages"]])
+    return {"messages": [response]}
+
+
+def _last_ai_message(state: AgentState) -> AIMessage | None:
+    if not state["messages"]:
+        return None
+    message = state["messages"][-1]
+    return message if isinstance(message, AIMessage) else None
+
+
+def _state_changing_calls(state: AgentState) -> list[dict]:
+    message = _last_ai_message(state)
+    if message is None:
+        return []
+    return [
+        call
+        for call in message.tool_calls
+        if call.get("name") == STATE_CHANGING_TOOL_NAME
+    ]
+
+
+def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
+    args = call.get("args", {})
+    return Phase3ActionProposal(
+        action_id=args["action_id"],
+        target=args["target"],
+        rationale=args["rationale"],
+        expected_effect=args["expected_effect"],
+        parameters={"rport": args["rport"]},
     )
 
-    return {
-        "messages": [response],
-    }
+
+def approval_gate_node(state: AgentState) -> AgentState:
+    calls = _state_changing_calls(state)
+    if len(calls) != 1:
+        raise ValueError(
+            "Exactly one state-changing proposal may await CLI approval at a time."
+        )
+
+    proposal = _proposal_from_tool_call(calls[0])
+    return {"pending_approval": create_pending_approval(proposal)}
+
+
+def rejection_node(state: AgentState) -> AgentState:
+    message = _last_ai_message(state)
+    if message is None or not message.tool_calls:
+        return {"messages": []}
+
+    tool_messages = []
+    for call in message.tool_calls:
+        content = json.dumps(
+            {
+                "status": "blocked",
+                "reason": "human_rejected",
+                "message": "The user rejected the pending action. Nothing was executed.",
+            },
+            sort_keys=True,
+        )
+        tool_messages.append(
+            ToolMessage(
+                content=content,
+                tool_call_id=call["id"],
+                name=call.get("name"),
+            )
+        )
+
+    return {"messages": tool_messages, "pending_approval": None}
+
+
+def route_from_start(state: AgentState) -> str:
+    approval = state.get("pending_approval")
+    if approval is not None and approval.decision == "approved":
+        return "tools"
+    if approval is not None and approval.decision == "rejected":
+        return "rejection"
+    return "agent"
+
+
+def route_after_agent(state: AgentState) -> str:
+    message = _last_ai_message(state)
+    if message is None or not message.tool_calls:
+        return END
+    if _state_changing_calls(state):
+        return "approval_gate"
+    return "tools"
 
 
 graph_builder = StateGraph(AgentState)
 
 graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("approval_gate", approval_gate_node)
+graph_builder.add_node("rejection", rejection_node)
 graph_builder.add_node("tools", ToolNode(tools))
 
-graph_builder.add_edge(START, "agent")
+graph_builder.add_conditional_edges(
+    START,
+    route_from_start,
+    {
+        "agent": "agent",
+        "tools": "tools",
+        "rejection": "rejection",
+    },
+)
 
 graph_builder.add_conditional_edges(
     "agent",
-    tools_condition,
+    route_after_agent,
     {
+        "approval_gate": "approval_gate",
         "tools": "tools",
         END: END,
     },
 )
 
+graph_builder.add_edge("approval_gate", END)
+graph_builder.add_edge("rejection", "agent")
 graph_builder.add_edge("tools", "agent")
 
 graph = graph_builder.compile()
