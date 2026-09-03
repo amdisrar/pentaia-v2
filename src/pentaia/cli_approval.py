@@ -7,6 +7,7 @@ from pentaia.approval import (
     format_approval_prompt,
     reject_phase3_action,
 )
+from pentaia.phase3_audit import audit_approval
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ def resolve_cli_approval(
                 approval,
                 proposal_signature=signature,
             )
+            audit_approval(resolved)
             logger.info(
                 "CLI approval decision=approved action_id=%s target=%s proposal_signature=%s",
                 approval.proposal.action_id,
@@ -46,6 +48,7 @@ def resolve_cli_approval(
 
         if answer in {"", "n", "no"}:
             resolved = reject_phase3_action(approval)
+            audit_approval(resolved)
             logger.info(
                 "CLI approval decision=rejected action_id=%s target=%s proposal_signature=%s",
                 approval.proposal.action_id,
