@@ -5,6 +5,7 @@ import pytest
 from pentaia.approval import approve_phase3_action, create_pending_approval
 from pentaia.graph import _proposal_from_tool_call
 from pentaia.metasploit_wrapper import prepare_metasploit_parameters
+from pentaia.phase3_audit import user_safe_failure_message
 from pentaia.phase3_tools import _run_phase3_validation_tool
 
 
@@ -85,4 +86,7 @@ def test_changed_runtime_callback_invalidates_prior_approval(
     )
 
     assert payload["status"] == "blocked"
-    assert "stale or belongs to a different action" in payload["error"]
+    assert payload["error"] == user_safe_failure_message("blocked")
+    assert payload["result"] is None
+    assert payload["normalized_result"]["execution_status"] == "not_run"
+    assert payload["normalized_result"]["outcome"] == "blocked"
