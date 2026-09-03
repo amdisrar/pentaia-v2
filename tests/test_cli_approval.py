@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import AIMessage
 
 from pentaia.approval import Phase3ActionProposal, create_pending_approval
@@ -10,13 +11,18 @@ from pentaia.graph import (
 )
 
 
+@pytest.fixture(autouse=True)
+def configured_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+
+
 def _proposal() -> Phase3ActionProposal:
     return Phase3ActionProposal(
         action_id="validate_vsftpd_234_backdoor",
         target="172.16.0.64",
         rationale="normalized source evidence",
         expected_effect="controlled validation",
-        parameters={"rport": 21},
+        parameters={"rport": 21, "lhost": "172.16.0.13"},
     )
 
 
@@ -57,6 +63,7 @@ def test_cli_prompt_renders_exact_pending_context() -> None:
     assert approval.proposal.rationale in rendered
     assert approval.proposal.expected_effect in rendered
     assert '"rport": 21' in rendered
+    assert '"lhost": "172.16.0.13"' in rendered
     assert approval.proposal.signature() in rendered
     assert resolved.is_rejected
 
@@ -152,7 +159,7 @@ def test_stale_approval_signature_changes_with_proposal() -> None:
         target=original.target,
         rationale=original.rationale,
         expected_effect=original.expected_effect,
-        parameters={"rport": 22},
+        parameters={"rport": 22, "lhost": "172.16.0.13"},
     )
 
     assert original.signature() != changed.signature()
