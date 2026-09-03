@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +36,7 @@ def test_helper_routes_exact_proposal_to_controlled_wrapper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = {}
-    approval = object()
+    approval = SimpleNamespace(decision="approved")
 
     def fake_run(proposal, provided_approval):
         captured["proposal"] = proposal
