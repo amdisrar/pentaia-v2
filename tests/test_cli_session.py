@@ -1,8 +1,12 @@
-from langchain_core.messages import AIMessage, HumanMessage
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 import pentaia
-from pentaia.approval import Phase3ActionProposal, create_pending_approval
+from pentaia.approval import (
+    Phase3ActionProposal,
+    approve_phase3_action,
+    create_pending_approval,
+)
 from pentaia.graph import graph
 
 
@@ -87,7 +91,7 @@ def test_approval_resume_submits_only_resolved_state_on_same_session(monkeypatch
         }
 
     def fake_resolve(approval):
-        return pentaia.approve_phase3_action(
+        return approve_phase3_action(
             approval,
             proposal_signature=approval.proposal.signature(),
         )
@@ -149,7 +153,7 @@ def test_approval_cycle_limit_stops_without_implicit_approval(monkeypatch) -> No
 
     def fake_resolve(approval):
         approvals.append(approval)
-        return pentaia.approve_phase3_action(
+        return approve_phase3_action(
             approval,
             proposal_signature=approval.proposal.signature(),
         )
