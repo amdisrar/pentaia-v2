@@ -104,7 +104,9 @@ def test_helper_returns_structured_block_when_approval_is_missing(
 
     assert payload["action_id"] == "validate_vsftpd_234_backdoor"
     assert payload["changes_state"] is True
-    assert payload["error"] == "Phase 3 action requires explicit human approval."
+    assert payload["error"] == (
+        "The requested validation was blocked by PentAiA's approval or authorization controls."
+    )
     assert payload["result"] is None
     assert payload["status"] == "blocked"
     assert payload["target"] == "172.16.0.64"
@@ -133,7 +135,7 @@ def test_helper_returns_structured_error_for_runtime_failure(
 
     assert payload["status"] == "error"
     assert payload["result"] is None
-    assert payload["error"] == "controlled executor unavailable"
+    assert payload["error"] == "The controlled validation tool is currently unavailable."
     assert payload["normalized_result"]["outcome"] == "error"
     assert payload["normalized_result"]["execution_status"] == "error"
 
