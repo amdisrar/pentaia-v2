@@ -6,7 +6,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
 from pentaia.approval import Phase3ActionProposal, Phase3ApprovalState
-from pentaia.metasploit_wrapper import run_metasploit_action
+from pentaia.metasploit_wrapper import prepare_metasploit_parameters, run_metasploit_action
 from pentaia.phase3_results import normalize_phase3_result
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,23 @@ def _response(
     return json.dumps(payload, sort_keys=True)
 
 
+def _base_proposal(
+    *,
+    action_id: Phase3ActionId,
+    target: str,
+    rationale: str,
+    expected_effect: str,
+    rport: int,
+) -> Phase3ActionProposal:
+    return Phase3ActionProposal(
+        action_id=action_id,
+        target=target,
+        rationale=rationale,
+        expected_effect=expected_effect,
+        parameters={"rport": rport},
+    )
+
+
 def _run_phase3_validation_tool(
     *,
     action_id: Phase3ActionId,
@@ -45,12 +62,12 @@ def _run_phase3_validation_tool(
     approval: Phase3ApprovalState | None,
 ) -> str:
     """Execute one already-approved, code-owned Phase 3 validation proposal."""
-    proposal = Phase3ActionProposal(
+    base_proposal = _base_proposal(
         action_id=action_id,
         target=target,
         rationale=rationale,
         expected_effect=expected_effect,
-        parameters={"rport": rport},
+        rport=rport,
     )
 
     logger.info(
@@ -60,6 +77,17 @@ def _run_phase3_validation_tool(
     )
 
     try:
+        parameters = prepare_metasploit_parameters(
+            action_id,
+            {"rport": rport},
+        )
+        proposal = Phase3ActionProposal(
+            action_id=action_id,
+            target=target,
+            rationale=rationale,
+            expected_effect=expected_effect,
+            parameters=parameters,
+        )
         result = run_metasploit_action(proposal, approval)
     except ValueError as exc:
         logger.warning(
@@ -69,7 +97,7 @@ def _run_phase3_validation_tool(
             exc,
         )
         normalized = normalize_phase3_result(
-            proposal=proposal,
+            proposal=base_proposal,
             approval=approval,
             tool_status="blocked",
             error=str(exc),
@@ -135,8 +163,8 @@ def phase3_controlled_validation(
     Use this tool only when normalized Phase 2 evidence has already mapped to the
     named supported action and the exact proposal has received explicit human
     approval. The approval value is injected from LangGraph state and is not a
-    model-controlled argument. Target authorization, exact approval matching,
-    and typed parameter validation are re-checked before any state change.
+    model-controlled argument. Runtime-owned callback configuration is resolved by
+    PentAiA, included in the exact proposal, and revalidated before execution.
 
     Returns structured JSON containing both raw execution context and a conservative
     normalized result for downstream interpretation.
