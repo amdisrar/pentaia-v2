@@ -13,6 +13,7 @@ from pentaia.approval import (
     create_pending_approval,
 )
 from pentaia.llm import get_llm
+from pentaia.metasploit_wrapper import prepare_metasploit_parameters
 from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
@@ -46,7 +47,9 @@ SYSTEM_MESSAGE = SystemMessage(
         "For Phase 3, use phase3_controlled_validation only for a code-owned supported validation action that is "
         "traceable to normalized Phase 2 evidence. The exact proposal must already have explicit human approval. "
         "Approval is injected from graph state and is not a parameter you can provide or modify. "
-        "If approval is missing, stale, rejected, or the target is not authorized, the tool must remain blocked. "
+        "Runtime-owned material parameters are resolved by PentAiA before approval and are not model-controlled. "
+        "If approval is missing, stale, rejected, runtime configuration is invalid, or the target is not authorized, "
+        "the tool must remain blocked. "
         + PHASE3_INTERPRETATION_RULES
     )
 )
@@ -91,12 +94,17 @@ def _state_changing_calls(state: AgentState) -> list[dict]:
 
 def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
     args = call.get("args", {})
+    action_id = args["action_id"]
+    parameters = prepare_metasploit_parameters(
+        action_id,
+        {"rport": args["rport"]},
+    )
     return Phase3ActionProposal(
-        action_id=args["action_id"],
+        action_id=action_id,
         target=args["target"],
         rationale=args["rationale"],
         expected_effect=args["expected_effect"],
-        parameters={"rport": args["rport"]},
+        parameters=parameters,
     )
 
 
