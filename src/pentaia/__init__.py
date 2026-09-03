@@ -5,6 +5,7 @@ import time
 
 from langchain_core.messages import HumanMessage
 
+from pentaia.cli_approval import resolve_cli_approval
 from pentaia.graph import graph
 from pentaia.logging_config import setup_logging
 
@@ -18,20 +19,47 @@ def show_spinner(stop_event: threading.Event) -> None:
         snake = "~~~>" if direction > 0 else "<~~~"
         frame = " " * position + snake
         frame = frame.ljust(track_width + len(snake))
-
         sys.stdout.write(f"\rPentAiA is working... {frame}")
         sys.stdout.flush()
         time.sleep(0.12)
-
         if position >= track_width:
             direction = -1
         elif position <= 0:
             direction = 1
-
         position += direction
 
     sys.stdout.write("\r" + " " * 60 + "\r")
     sys.stdout.flush()
+
+
+def _invoke_with_spinner(state: dict) -> dict:
+    stop_event = threading.Event()
+    spinner_thread = threading.Thread(
+        target=show_spinner,
+        args=(stop_event,),
+        daemon=True,
+    )
+    spinner_thread.start()
+    try:
+        return graph.invoke(state)
+    finally:
+        stop_event.set()
+        spinner_thread.join()
+
+
+def run_cli_turn(user_input: str) -> dict:
+    result = _invoke_with_spinner(
+        {"messages": [HumanMessage(content=user_input)]}
+    )
+
+    while True:
+        pending = result.get("pending_approval")
+        if pending is None or pending.decision != "pending":
+            return result
+
+        resolved = resolve_cli_approval(pending)
+        result["pending_approval"] = resolved
+        result = _invoke_with_spinner(result)
 
 
 def main() -> None:
@@ -39,7 +67,6 @@ def main() -> None:
     logger = logging.getLogger(__name__)
 
     logger.info("PentAiA started")
-
     print("PentAiA v2")
     print("Type 'exit' or 'quit' to stop.\n")
 
@@ -55,30 +82,8 @@ def main() -> None:
                 print("Goodbye.")
                 break
 
-            stop_event = threading.Event()
-
-            spinner_thread = threading.Thread(
-                target=show_spinner,
-                args=(stop_event,),
-                daemon=True,
-            )
-
-            spinner_thread.start()
-
-            try:
-                result = graph.invoke(
-                    {
-                        "messages": [
-                            HumanMessage(content=user_input)
-                        ]
-                    }
-                )
-            finally:
-                stop_event.set()
-                spinner_thread.join()
-
+            result = run_cli_turn(user_input)
             final_message = result["messages"][-1]
-
             print(f"{final_message.text}\n")
 
         except Exception:
