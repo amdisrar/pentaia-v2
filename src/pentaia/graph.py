@@ -7,6 +7,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from pentaia.approval import Phase3ApprovalState
 from pentaia.llm import get_llm
+from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
 
 SYSTEM_MESSAGE = SystemMessage(
@@ -32,7 +33,11 @@ SYSTEM_MESSAGE = SystemMessage(
         "Prioritize findings primarily by scanner severity and CVSS when available, but do not fabricate ranking data. "
         "Recommendations should focus on remediation, validation, hardening, patching, configuration changes, "
         "or safe follow-up reconnaissance. Do not provide or execute exploitation steps in Phase 2. "
-        "Base conclusions on actual tool output and do not invent findings."
+        "Base conclusions on actual tool output and do not invent findings. "
+        "For Phase 3, use phase3_controlled_validation only for a code-owned supported validation action that is "
+        "traceable to normalized Phase 2 evidence. The exact proposal must already have explicit human approval. "
+        "Approval is injected from graph state and is not a parameter you can provide or modify. "
+        "If approval is missing, stale, rejected, or the target is not authorized, the tool must remain blocked."
     )
 )
 
@@ -45,6 +50,7 @@ class AgentState(TypedDict):
 tools = [
     nmap_service_scan,
     nuclei_vulnerability_scan,
+    phase3_controlled_validation,
 ]
 
 llm = get_llm().bind_tools(tools)
