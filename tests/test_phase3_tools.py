@@ -72,6 +72,8 @@ def test_helper_routes_exact_proposal_to_controlled_wrapper(
     assert payload["status"] == "success"
     assert payload["changes_state"] is True
     assert payload["error"] is None
+    assert payload["normalized_result"]["outcome"] == "inconclusive"
+    assert payload["normalized_result"]["execution_status"] == "completed"
 
 
 def test_helper_returns_structured_block_when_approval_is_missing(
@@ -93,14 +95,14 @@ def test_helper_returns_structured_block_when_approval_is_missing(
         )
     )
 
-    assert payload == {
-        "action_id": "validate_vsftpd_234_backdoor",
-        "changes_state": True,
-        "error": "Phase 3 action requires explicit human approval.",
-        "result": None,
-        "status": "blocked",
-        "target": "172.16.0.64",
-    }
+    assert payload["action_id"] == "validate_vsftpd_234_backdoor"
+    assert payload["changes_state"] is True
+    assert payload["error"] == "Phase 3 action requires explicit human approval."
+    assert payload["result"] is None
+    assert payload["status"] == "blocked"
+    assert payload["target"] == "172.16.0.64"
+    assert payload["normalized_result"]["outcome"] == "blocked"
+    assert payload["normalized_result"]["execution_status"] == "not_run"
 
 
 def test_helper_returns_structured_error_for_runtime_failure(
@@ -125,6 +127,8 @@ def test_helper_returns_structured_error_for_runtime_failure(
     assert payload["status"] == "error"
     assert payload["result"] is None
     assert payload["error"] == "controlled executor unavailable"
+    assert payload["normalized_result"]["outcome"] == "error"
+    assert payload["normalized_result"]["execution_status"] == "error"
 
 
 def test_tool_action_id_is_code_owned_literal() -> None:
