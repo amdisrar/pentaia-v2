@@ -1,10 +1,11 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from pentaia.approval import Phase3ApprovalState
 from pentaia.llm import get_llm
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
 
@@ -38,6 +39,7 @@ SYSTEM_MESSAGE = SystemMessage(
 
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    pending_approval: NotRequired[Phase3ApprovalState | None]
 
 
 tools = [
