@@ -89,6 +89,21 @@ def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str
     raise ValueError(f"Unsupported Phase 3 Metasploit action: {action_id}")
 
 
+def _require_current_runtime_parameters(
+    operation: MetasploitOperation,
+    parameters: dict[str, Any],
+) -> None:
+    """Ensure approval-bound runtime values still match current configuration."""
+    if not operation.requires_callback_address:
+        return
+
+    current_lhost = get_phase3_callback_address()
+    if parameters["lhost"] != current_lhost:
+        raise ValueError(
+            "Runtime callback configuration changed after approval; approval is stale."
+        )
+
+
 def _build_command(
     operation: MetasploitOperation,
     target: str,
@@ -134,6 +149,12 @@ def run_metasploit_action(
     # Authorization is a separate fail-closed gate; deny/protected targets win.
     target = authorize_phase3_target(proposal.target)
     parameters = _validate_parameters(proposal.action_id, proposal.parameters)
+
+    # Runtime-owned material values are resolved before approval, included in the
+    # proposal signature, and checked again immediately before execution. A changed,
+    # missing, or invalid runtime value makes the prior approval unusable.
+    _require_current_runtime_parameters(operation, parameters)
+
     command = _build_command(operation, target, parameters)
 
     logger.info(
