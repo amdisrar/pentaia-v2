@@ -131,4 +131,7 @@ def test_tool_action_id_is_code_owned_literal() -> None:
     schema = phase3_controlled_validation.tool_call_schema.model_json_schema()
     action_schema = schema["properties"]["action_id"]
 
-    assert action_schema["enum"] == ["validate_vsftpd_234_backdoor"]
+    if "const" in action_schema:
+        assert action_schema["const"] == "validate_vsftpd_234_backdoor"
+    else:
+        assert action_schema["enum"] == ["validate_vsftpd_234_backdoor"]
