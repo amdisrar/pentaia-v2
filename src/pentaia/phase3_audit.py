@@ -105,6 +105,7 @@ def user_safe_failure_message(category: str) -> str:
         "blocked": "The requested validation was blocked by PentAiA's approval or authorization controls.",
         "timeout": "The controlled validation timed out before a reliable result was returned.",
         "unavailable": "The controlled validation tool is currently unavailable.",
+        "conflict": "A PentAiA validation session is already running; close it before starting another.",
         "execution": "The controlled validation could not complete successfully.",
         "malformed": "The controlled validation returned an unusable result.",
     }

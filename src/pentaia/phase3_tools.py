@@ -6,7 +6,11 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
 from pentaia.approval import Phase3ActionProposal, Phase3ApprovalState
-from pentaia.metasploit_wrapper import prepare_metasploit_parameters, run_metasploit_action
+from pentaia.metasploit_wrapper import (
+    PREDEFINED_METASPLOIT_OPERATIONS,
+    prepare_metasploit_parameters,
+    run_metasploit_action,
+)
 from pentaia.phase3_audit import (
     audit_failure,
     audit_proposal,
@@ -14,10 +18,21 @@ from pentaia.phase3_audit import (
     user_safe_failure_message,
 )
 from pentaia.phase3_results import normalize_phase3_result
+from pentaia.phase3_session import start_live_session
 
 logger = logging.getLogger(__name__)
 
 Phase3ActionId = Literal["validate_vsftpd_234_backdoor"]
+
+# Phase 3 actions that establish a reverse session leave it held open on the Kali
+# host, because PentAiA never drives an interactive session itself. The operator
+# takes it over from the printed console.
+SESSION_HANDOFF = (
+    "A reverse session is held open in the PentAiA console on the Kali host. "
+    "The operator takes it over by running the attach command on Kali, listing "
+    "sessions with 'sessions', and selecting one with 'sessions -i <id>'. "
+    "PentAiA issues no further commands through that session."
+)
 
 
 def _response(
@@ -27,6 +42,7 @@ def _response(
     target: str,
     result: dict | None = None,
     normalized_result: dict | None = None,
+    session: dict | None = None,
     error: str | None = None,
 ) -> str:
     payload = {
@@ -36,6 +52,7 @@ def _response(
         "target": target,
         "result": result,
         "normalized_result": normalized_result,
+        "session": session,
         "error": error,
     }
     return json.dumps(payload, sort_keys=True)
@@ -62,6 +79,8 @@ def _runtime_failure_category(exc: RuntimeError) -> str:
     message = str(exc).lower()
     if "timed out" in message or "timeout" in message:
         return "timeout"
+    if "already running" in message:
+        return "conflict"
     if (
         "unavailable" in message
         or "unable to connect" in message
@@ -96,6 +115,9 @@ def _run_phase3_validation_tool(
         target,
     )
 
+    operation = PREDEFINED_METASPLOIT_OPERATIONS.get(action_id)
+    holds_session = operation is not None and operation.establishes_reverse_session
+
     try:
         parameters = prepare_metasploit_parameters(
             action_id,
@@ -109,7 +131,16 @@ def _run_phase3_validation_tool(
             parameters=parameters,
         )
         audit_proposal(proposal, approval)
-        result = run_metasploit_action(proposal, approval)
+
+        if holds_session:
+            # The approved effect is a held reverse session, so the action runs
+            # once inside a detached console that keeps the shell. The console
+            # pane - not a process exit status - is the evidence.
+            session = start_live_session(proposal, approval)
+            result = None
+        else:
+            session = None
+            result = run_metasploit_action(proposal, approval)
     except ValueError as exc:
         proposal_for_audit = locals().get("proposal", base_proposal)
         logger.warning(
@@ -169,20 +200,44 @@ def _run_phase3_validation_tool(
             error=user_safe_failure_message(category),
         )
 
-    status = "success" if result.exit_code == 0 else "failed"
-    normalized = normalize_phase3_result(
-        proposal=proposal,
-        approval=approval,
-        tool_status=status,
-        execution_result=result,
-    )
+    if holds_session:
+        status = "success" if session.established else "failed"
+        normalized = normalize_phase3_result(
+            proposal=proposal,
+            approval=approval,
+            tool_status=status,
+            session_evidence=session.evidence,
+        )
+        session_payload = (
+            {
+                "name": session.session_name,
+                "established": True,
+                "lhost": session.lhost,
+                "lport": session.lport,
+                "attach": session.attach,
+                "handoff": SESSION_HANDOFF,
+            }
+            if session.established
+            else None
+        )
+    else:
+        status = "success" if result.exit_code == 0 else "failed"
+        normalized = normalize_phase3_result(
+            proposal=proposal,
+            approval=approval,
+            tool_status=status,
+            execution_result=result,
+        )
+        session_payload = None
+
     audit_result(normalized)
     return _response(
         status=status,
         action_id=action_id,
         target=target,
-        result=result.to_dict(),
+        result=result.to_dict() if result is not None else None,
         normalized_result=normalized.to_dict(),
+        session=session_payload,
     )
 
 
