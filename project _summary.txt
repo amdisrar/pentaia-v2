@@ -1,5 +1,7 @@
 PentAiA v2 — Project Handoff Summary
 Snapshot date: 2026-09-11
+Revised: 2026-09-11 — Phase 3 exploitation verified end to end for the first
+time (see section 9). Sections 9, 10, 12, 13, 16 and 17 were updated.
 Repository: amdisrar/pentaia-v2
 Default branch: main
 
@@ -219,7 +221,18 @@ The current src/pentaia package includes the major modules below:
 - logging_config.py
   Application logging setup.
 
-There are corresponding pytest modules under tests/ for authorization, approval, CLI approval/session state, wrappers, mapping, runtime configuration, audit, and normalized results.
+- phase3_session.py  (NEW 2026-09-11)
+  Code-owned persistence of an approved Phase 3 reverse session. Runs msfconsole
+  inside a detached tmux session on the Kali host so the handler and the caught
+  shell outlive the SSH call, reads evidence from the console pane, and returns
+  the human handoff details. Rechecks approval, authorization and runtime-value
+  freshness before creating a session, refuses when one is already running, and
+  tears the console down when no session was caught.
+
+Note: PENTAIA_LPORT validation lives in runtime_config.py alongside the callback
+address (validate_listener_port / get_phase3_listener_port).
+
+There are corresponding pytest modules under tests/ for authorization, approval, CLI approval/session state, wrappers, mapping, runtime configuration, audit, normalized results, and the held session.
 
 ======================================================================
 7. COMPLETED WORK — PHASE 1
@@ -300,11 +313,80 @@ uv run pytest -v
 
 Current checkpoint persistence is process-local only. It survives multiple prompts in the same running CLI process but does NOT survive an application restart. Cross-restart persistence is Phase 5 issue #50.
 
+----------------------------------------------------------------------
+9b. PHASE 3 EXPLOITATION — VERIFIED END TO END (2026-09-11)
+----------------------------------------------------------------------
+
+Before this, the exploitation leg had never once been verified. It was not a
+skill or configuration problem: FIVE independent blockers were stacked on top of
+each other, and each one hid the next.
+
+1. No PAYLOAD or TARGET was pinned, so the run inherited whatever the installed
+   Metasploit build defaulted to. On this lab build the default is a fetch
+   stager whose inline handler blocks forever waiting for a callback, so the
+   symptom was a silent infinite hang rather than an error.
+2. paramiko's Channel.recv_exit_status() waits on an event with NO timeout. The
+   timeout passed to exec_command only sets the socket read timeout, so a remote
+   process that never exits hangs PentAiA indefinitely.
+3. kali_executor left the remote stdin channel open, so any remote command that
+   reads stdin blocked until the process was killed.
+4. "run" dropped msfconsole into interactive session mode, which then blocked on
+   "Abort session 1? [y/N]" and exited 124 even after a session had opened.
+5. phase3_results mapped success to "inconclusive" unconditionally, so a real
+   pwn could never be reported as one.
+
+What was implemented:
+
+- The predefined operation pins TARGET, PAYLOAD, LPORT and AutoCheck as
+  code-owned values. Model-facing parameters are unchanged.
+- The Metasploit command is bounded on the Kali side with
+  "timeout --signal=INT --kill-after=<n>" and given SSH-side headroom.
+- Remote stdin is closed after exec_command.
+- The console runs with "run -z" so it does not block interacting with a session.
+- normalize_phase3_result() derives the outcome from RETURNED EVIDENCE
+  (uid=0(root), command shell session, meterpreter session) instead of assuming a
+  clean exit proves anything. Exit code 0 alone still never counts as success.
+- PENTAIA_LPORT is runtime-owned: resolved before approval, covered by the signed
+  proposal, revalidated immediately before execution, and emitted as "set LPORT".
+- phase3_session.py holds the reverse session open for the human: msfconsole runs
+  inside a detached tmux session on the Kali host, the console pane is the
+  evidence, and the operator takes over with tmux attach + sessions -i <id>.
+- phase3_controlled_validation routes reverse-session actions through that held
+  session, and its result carries the session name, callback address/port, attach
+  command and handoff note. The agent relays the handoff and never claims to have
+  typed into the session.
+
+Verified against the authorized lab (Metasploitable 172.16.0.64, Kali
+172.16.0.13): the CLI approval prompt shows the resolved lhost/lport; approving
+yields outcome "success"; attaching to the held session and running `id` returns
+uid=0(root).
+
+Commits: ce24d75, dd549d8, ffaba6f (pushed to origin/main).
+
+LAB-SPECIFIC FACTS DISCOVERED BY TESTING — do not re-derive these blind:
+
+- The lab Metasploit build (Framework 6.5.2-dev) exposes a SINGLE target
+  (index 0, "Linux/Unix Command"). "set TARGET 1" fails at run time with
+  "Invalid target index".
+- "cmd/unix/interact" is NOT available on that build; it is rejected with
+  "The value specified for PAYLOAD is not valid".
+- The backdoor shell on 6200/TCP executes through "sh", where bash's /dev/tcp
+  pseudo-device does NOT exist:
+      sh: line 2: /dev/tcp/172.16.0.13/4444: No such file or directory
+  so ANY /dev/tcp-based reverse payload (e.g. cmd/unix/reverse_bash) cannot
+  connect back on this target. "cmd/unix/reverse_perl" works.
+- The backdoor bind listener on 6200/TCP stays bound after the first trigger, and
+  the automatic exploitability check then aborts with "Cannot reliably check
+  exploitability". That is why AutoCheck is disabled for this action.
+- A held session keeps the listener port bound, so a second run refuses with a
+  "conflict" until the tmux session is killed.
+
 ======================================================================
 10. CURRENT PHASE 3 STATE
 ======================================================================
 
-Phase 3 is functional at the component level but not considered fully finished.
+Phase 3 is functional and, as of 2026-09-11, VERIFIED end to end against the
+authorized lab. The remaining work is completeness rather than proof of concept.
 
 Already implemented:
 - target allowlist/denylist policy
@@ -319,14 +401,26 @@ Already implemented:
 - conservative Gemini interpretation rules
 - Phase 3 audit module
 - same-process conversation/checkpoint persistence
-- runtime callback-address validation
+- runtime callback-address and listener-port validation
+- VERIFIED exploitation producing a reverse shell back to Kali
+- held validation session with explicit human handoff (tmux console)
 
 Remaining Phase 3 work is mainly:
-- finish/close validation of P3-09 and P3-10
-- automatically connect discovery findings to the Test Framework candidate lookup in normal orchestration (P3-13)
-- introduce reusable typed profile/parameter ownership architecture and runtime listener-port allocation (P3-14)
-- add validation-session lifecycle, proof artifact, and explicit human handoff (P3-15)
-- then run/update the final consolidated end-to-end Phase 3 acceptance workflow (P3-11)
+- close out P3-09 (effectively satisfied: the suite is green and the results were
+  recorded on the issue) and finish P3-10 (its manual CLI REJECT path has still
+  not been exercised; the approve path has)
+- automatically connect discovery findings to the Test Framework candidate lookup
+  in normal orchestration (P3-13). This is the reason the operator currently has
+  to name the action id in the prompt; validation_mapping.py exists and is tested
+  but nothing calls it in production.
+- complete the reusable typed profile/parameter ownership architecture and
+  listener-port POOL management (P3-14). Only the single runtime-owned listener
+  port is done.
+- complete the validation-session lifecycle (P3-15): the code-owned proof
+  artifact on the target, the pentaia session list/show/attach/close UX,
+  expiry/cleanup policy, lifecycle states and lifecycle audit events.
+- then run/update the final consolidated end-to-end Phase 3 acceptance workflow
+  (P3-11), which should be re-scoped to cover P3-13/P3-14/P3-15.
 
 ======================================================================
 11. ALL CURRENTLY OPEN GITHUB ISSUES
@@ -364,6 +458,11 @@ Planned completion: do not spend core engineering time on these until Phase 3/4 
 ---------------------------------------------------------------------
 C. PHASE 3 — IMPLEMENTATION EXISTS BUT ISSUE STILL NEEDS VALIDATION/CLOSURE
 ---------------------------------------------------------------------
+
+UPDATE 2026-09-11: #42 P3-09 is now satisfied — the suite is green (287 passed)
+and the verification was recorded on the issue, which simply needs closing.
+#48 P3-10's approve path has since been exercised live through the CLI approval
+prompt; only its manual reject path remains unverified.
 
 #42 — P3-09 Add Phase 3 logging, audit context, and failure handling
 Status: OPEN.
@@ -679,16 +778,22 @@ Do not implement this early unless required by a Phase 4 architectural dependenc
 
 Recommended immediate sequence from the current codebase:
 
-STEP 1 — Repository/test hygiene
-- run full pytest suite
-- confirm exact current pass count
-- validate and close #42 P3-09 if all checks pass
-- validate manual Reject/Approve behavior and close #48 P3-10
-- optionally update #15/README enough to stop advertising Phase 1 as current state
+STEP 1 — Repository/test hygiene  [LARGELY DONE 2026-09-11]
+- run full pytest suite -> DONE: 287 passed on the rebased tree
+- confirm exact current pass count -> 287
+- validate and close #42 P3-09 if all checks pass -> verification recorded on the
+  issue; it is still OPEN and should be closed
+- validate manual Reject/Approve behavior and close #48 P3-10 -> the APPROVE path
+  has now been exercised live through the CLI; the REJECT path has not
+- optionally update #15/README enough to stop advertising Phase 1 as current
+  state -> still not done
 
 STEP 2 — Implement #70 P3-13
 Automatic deterministic Test Framework lookup after discovery.
 This fixes the current usability gap where the agent may say it needs normalized evidence/approval context but does not automatically connect discovered findings to supported validation candidates.
+This is now the ONLY link missing from the attack chain: discovery works, and
+approved exploitation with a held session works, but nothing connects them, so
+the operator has to name the action id in the prompt.
 
 STEP 3 — Implement #71 P3-14
 Create the reusable typed parameter/profile ownership system and listener-port manager.
@@ -721,7 +826,14 @@ Run CLI:
 uv run pentaia
 
 Run all tests:
-uv run pytest -v
+uv run pytest tests -v
+
+WARNING: do NOT run a bare "uv run pytest" from the repository root.
+There is no [tool.pytest.ini_options] and no conftest.py, so testpaths is unset.
+A bare run also collects src/pentaia/test_*.py, whose module-level code executes
+LIVE side effects at import time: real Gemini API calls (test_gemini.py,
+test_gemini_tools.py), an SSH session to Kali (test_kali_executor.py) and
+"nmap -sV 172.16.0.13" (test_nmap_wrapper.py). Always scope to tests/.
 
 Run linting:
 uv run ruff check .
@@ -795,12 +907,24 @@ The project owner performs live/manual testing locally. Coding changes should in
 ======================================================================
 
 - README current-phase text is stale.
-- #42 P3-09 appears implemented but remains open pending recorded test confirmation.
-- #48 P3-10 appears implemented but remains open pending recorded tests/manual validation.
-- #49 P3-12 is closed and records 69 passed as its regression baseline.
-- #73 was a duplicate/alternate P3-15 issue and is closed; use OPEN issue #72 as the active P3-15 work item.
+- #42 P3-09 is implemented and its test verification was recorded on the issue;
+  it remains open only because nobody closed it. Close it.
+- #48 P3-10's approve path is now verified live; only its manual reject path is
+  outstanding.
+- #43 P3-11 now has a verified end-to-end result recorded as a comment, but the
+  issue checklist itself has not been updated.
+- #71 P3-14 and #72 P3-15 are both PARTIALLY implemented (runtime-owned listener
+  port; held session + handoff) and should not be treated as untouched.
+- #49 P3-12 is closed and records 69 passed as its regression baseline; the suite
+  is now 287 tests.
+- #73 was a duplicate/alternate P3-15 issue and is closed; use OPEN issue #72 as
+  the active P3-15 work item.
 - Cosmetic animation issues #27-#33 should not distract from Phase 3 completion.
 - Some older closed issue bodies may contain stale unchecked subtasks even though the issue itself is closed; use current code/tests and newer issues as the source of truth.
+- Untracked leftovers from an abandoned approach exist only in the working tree
+  and are NOT in git: src/pentaia/phase3_listener.py, src/pentaia/phase3_reverse.py
+  and their tests. phase3_reverse.py is built on the /dev/tcp mechanism that was
+  disproved on this target (see section 9b). Delete them.
 
 ======================================================================
 17. HANDOFF GUIDANCE FOR THE NEXT AI/DEVELOPER
@@ -821,12 +945,25 @@ When continuing this project:
 11. The project owner will run local/live tests; provide exact commands and expected behavior.
 12. Update the corresponding GitHub issue with implementation details and test results after work is verified.
 
-If beginning work immediately, start with:
+If beginning work immediately, do these in order:
 
-P3-13 / GitHub issue #70
+0. Tracker/admin, all cheap:
+   - close #42 P3-09
+   - tick #48 P3-10's approve-path box, leaving reject outstanding
+   - put the verified end-to-end result on #43's checklist
+   - delete the untracked phase3_listener.py / phase3_reverse.py leftovers
+   - re-enable workspace-write file access before editing anything
+
+1. P3-13 / GitHub issue #70
 
 Goal:
 Wire normalized discovery findings into the existing deterministic validation_mapping/Test Framework so supported candidates become automatically available for Gemini to recommend, while unsupported findings remain report-only and every state-changing action still requires the existing explicit human approval, authorization, exact-signature, and controlled-wrapper checks.
+
+Reminder on how this was validated last time: the owner runs every live test.
+Write the code, give one exact command with its expected output, and STOP. Do not
+write further code until the result comes back. Five of the six blockers found in
+the 2026-09-11 session were invisible to the green test suite and only surfaced
+from live lab output.
 
 ======================================================================
 END OF PROJECT HANDOFF SUMMARY
