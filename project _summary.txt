@@ -1,0 +1,833 @@
+PentAiA v2 — Project Handoff Summary
+Snapshot date: 2026-09-11
+Repository: amdisrar/pentaia-v2
+Default branch: main
+
+======================================================================
+1. PURPOSE OF THIS FILE
+======================================================================
+
+This file is a handoff summary for another AI/developer to continue PentAiA v2 without needing the full prior conversation history.
+
+It summarizes:
+- project objective and design philosophy
+- architecture and technology choices
+- what has already been implemented
+- current Phase 3 state
+- current repository structure
+- all GitHub issues that are OPEN at the time of this snapshot
+- the planned order for completing the remaining work
+- important security/control invariants that must not be weakened
+- useful local validation commands
+
+IMPORTANT REPOSITORY NOTE:
+The current README.md still says the project is at "Phase 1 — End-to-end Nmap demonstration." That README line is stale. The implementation and GitHub issue history have progressed through Phase 1 and Phase 2 and are now actively working on Phase 3, with Phase 4 already designed as backlog issues.
+
+======================================================================
+2. PROJECT OBJECTIVE
+======================================================================
+
+PentAiA v2 is an AI-assisted penetration-testing/security-assessment research and learning agent intended for explicitly authorized lab and defensive environments.
+
+The project is designed to combine:
+- natural-language interaction
+- LangGraph workflow/state management
+- LangChain tool calling
+- Google Gemini as the LLM
+- Python-owned security-tool wrappers
+- a shared Kali Linux execution layer over SSH
+- deterministic evidence normalization
+- explicit target authorization
+- exact human approval before state-changing validation
+- structured audit and result handling
+
+The core philosophy is:
+
+The LLM decides WHAT capability it needs from the capabilities PentAiA exposes.
+PentAiA code decides HOW that capability is implemented safely.
+The human decides WHETHER an approval-requiring action is allowed to execute.
+
+Gemini must never receive unrestricted shell access, arbitrary native tool arguments, arbitrary framework commands, or the ability to manufacture approval state.
+
+======================================================================
+3. CURRENT TECHNOLOGY STACK
+======================================================================
+
+Primary development environment:
+- Ubuntu 26.04.1 LTS
+- uv project/dependency manager
+- Python >=3.13,<3.15
+- src/ package layout
+
+Main Python dependencies currently declared in pyproject.toml:
+- langchain
+- langgraph
+- langchain-google-genai
+- paramiko
+- python-dotenv
+
+Development dependencies:
+- pytest
+- ruff
+
+Application entry point:
+- pentaia = "pentaia:main"
+
+Current Gemini configuration example:
+- GEMINI_MODEL=gemini-3.5-flash-lite
+
+Remote execution model:
+PentAiA host -> Paramiko SSH -> Kali Linux -> authorized lab target
+
+Current environment variable names include:
+- GOOGLE_API_KEY
+- GEMINI_MODEL
+- KALI_HOST
+- KALI_PORT
+- KALI_USERNAME
+- KALI_SSH_KEY
+- PENTAIA_LHOST
+- PENTAIA_NUCLEI_DENYLIST
+- PENTAIA_PHASE3_ALLOWLIST
+- PENTAIA_PHASE3_DENYLIST
+
+Never commit real API keys, passwords, SSH private keys, RADIUS shared secrets, AD credentials, or other secrets.
+
+======================================================================
+4. HIGH-LEVEL ARCHITECTURE
+======================================================================
+
+Current overall flow:
+
+User
+  -> CLI
+  -> LangGraph workflow/state
+  -> Gemini through LangChain
+  -> typed PentAiA tool
+  -> Python wrapper / policy layer
+  -> shared Kali executor
+  -> SSH
+  -> Kali Linux
+  -> explicitly authorized lab target
+  -> structured tool result
+  -> normalized evidence
+  -> Gemini evidence-based interpretation
+
+Phase 3 extends the flow with authorization and explicit human approval:
+
+Normalized Phase 2 evidence
+  -> deterministic supported-validation mapping
+  -> authorization policy
+  -> exact action proposal
+  -> human approval gate
+       Reject -> no state-changing execution
+       Approve -> exact proposal resumes
+  -> controlled wrapper revalidates approval + authorization + parameters
+  -> shared Kali executor
+  -> structured Phase 3 result
+  -> conservative normalization
+  -> evidence-based Gemini explanation
+
+======================================================================
+5. IMPORTANT CONTROL / SECURITY INVARIANTS
+======================================================================
+
+These are architectural requirements and should not be weakened while adding features:
+
+1. Gemini has no unrestricted shell.
+2. Gemini has no unrestricted Metasploit/native-framework console.
+3. Native command lines are constructed by Python wrappers, not by model text.
+4. Model-visible parameters should be typed and semantic.
+5. Runtime-owned parameters must not be model-overridable.
+6. Code-owned constants/defaults must not be model-overridable.
+7. State-changing Phase 3 actions require explicit human approval.
+8. Approval is tied to the exact proposal signature.
+9. Any material change to target/action/parameters makes previous approval stale.
+10. Phase 3 target authorization is checked before execution and rechecked at execution time.
+11. Protected/denied targets override allowlisting.
+12. Unsupported findings must not cause guessed validation actions.
+13. Read-only discovery remains separate from state-changing approval paths.
+14. Tool results must be normalized conservatively.
+15. Exit code 0 alone must never be interpreted as proof of validation success.
+16. Credentials/secrets must not enter LangGraph state, browser output, audit records, or logs.
+17. Approval state must never be model-supplied.
+18. Future GUI/API layers must not allow the browser to call internal wrappers directly.
+
+======================================================================
+6. CURRENT SOURCE MODULES
+======================================================================
+
+The current src/pentaia package includes the major modules below:
+
+- __init__.py
+  CLI entry/runtime integration.
+
+- llm.py
+  Gemini/LangChain model setup.
+
+- graph.py
+  LangGraph orchestration, tool registration, state handling, and approval routing.
+
+- tools.py
+  Current LangChain tool definitions/integration for discovery tools.
+
+- kali_executor.py
+  Shared SSH execution layer using Paramiko.
+
+- nmap_wrapper.py
+  Controlled Nmap wrapper.
+
+- nuclei_wrapper.py
+  Controlled Nuclei wrapper.
+
+- findings.py
+  Normalized vulnerability finding model/parser logic.
+
+- validation.py
+  General validation helpers.
+
+- authorization.py
+  Phase 3 allowlist/denylist/protected-target policy.
+
+- approval.py
+  Phase 3 proposal, signature, approval state, and approval validation primitives.
+
+- cli_approval.py
+  Interactive CLI approve/reject handling.
+
+- validation_mapping.py
+  Deterministic mapping from normalized findings to code-owned supported validation candidates.
+
+- metasploit_check.py
+  Harmless Metasploit availability/version check on Kali.
+
+- metasploit_wrapper.py
+  Controlled predefined Phase 3 validation wrapper.
+
+- phase3_tools.py
+  Typed LangChain-facing Phase 3 controlled validation tool.
+
+- phase3_results.py
+  Structured Phase 3 result normalization and interpretation rules.
+
+- phase3_audit.py
+  Dedicated Phase 3 audit event handling with raw sensitive evidence excluded.
+
+- runtime_config.py
+  Runtime-owned configuration validation, including callback/listener configuration.
+
+- logging_config.py
+  Application logging setup.
+
+There are corresponding pytest modules under tests/ for authorization, approval, CLI approval/session state, wrappers, mapping, runtime configuration, audit, and normalized results.
+
+======================================================================
+7. COMPLETED WORK — PHASE 1
+======================================================================
+
+Phase 1 established the first complete vertical slice.
+
+Completed GitHub work includes:
+- P1-01 project initialization
+- P1-02 Python/uv environment
+- P1-03 Gemini + LangChain integration
+- P1-04 Kali SSH setup
+- P1-05 shared Kali executor
+- P1-06 Nmap wrapper
+- P1-07 IPv4 validation
+- P1-08 Nmap LangChain tool
+- P1-09 Gemini tool-calling test
+- P1-10 basic LangGraph workflow
+- P1-11 CLI
+- P1-12 error handling
+- P1-13 logging
+- P1-14 end-to-end Nmap demo
+- P1-12-A Kali failure test
+
+The only remaining Phase 1 issue is documentation issue #15.
+
+======================================================================
+8. COMPLETED WORK — PHASE 2
+======================================================================
+
+Phase 2 added vulnerability discovery/analysis while keeping execution controlled.
+
+Completed work includes:
+- Phase 2 architecture definition
+- Nuclei installation/validation on Kali
+- Nuclei Python wrapper
+- controlled Nuclei configuration
+- Nuclei LangChain tool
+- vulnerability finding data model/parser
+- multi-tool LangGraph reconnaissance flow
+- Gemini evidence-based vulnerability analysis
+- Phase 2 logging/error handling
+- end-to-end vulnerability assessment test
+
+Phase 2 introduced the important rule that service/version observations are not automatically vulnerabilities, and missing CVE/CVSS metadata must not be invented.
+
+======================================================================
+9. COMPLETED WORK — PHASE 3 CORE
+======================================================================
+
+The following Phase 3 issues are CLOSED and implemented:
+
+#34 P3-01 Define Phase 3 controlled testing architecture
+#35 P3-02 Add authorized-target policy for Phase 3 actions
+#36 P3-03 Implement human approval state in LangGraph
+#37 P3-04 Validate Metasploit availability on Kali
+#38 P3-05 Implement controlled Metasploit wrapper
+#39 P3-06 Map confirmed findings to approved validation actions
+#40 P3-07 Expose approved validation actions as LangChain tools
+#41 P3-08 Add structured Phase 3 result model and Gemini interpretation
+#49 P3-12 Add persistent CLI session parameters and LangGraph conversation state
+
+P3-12 is particularly important. It introduced:
+- stable session_id per running CLI process
+- LangGraph InMemorySaver checkpointing
+- configurable.thread_id mapping
+- recursion_limit
+- max_approval_cycles
+- same-thread approval resume
+- session isolation
+- PENTAIA_LHOST runtime configuration handling
+- callback configuration validation
+- stale approval protection when material callback context changes
+
+GitHub issue #49 records a successful full regression baseline of 69 passed. Later local testing also reported all tests passing after the final P3-12 fixes. The exact current total should always be reconfirmed locally with:
+
+uv run pytest -v
+
+Current checkpoint persistence is process-local only. It survives multiple prompts in the same running CLI process but does NOT survive an application restart. Cross-restart persistence is Phase 5 issue #50.
+
+======================================================================
+10. CURRENT PHASE 3 STATE
+======================================================================
+
+Phase 3 is functional at the component level but not considered fully finished.
+
+Already implemented:
+- target allowlist/denylist policy
+- protected-target handling
+- signed exact action proposals
+- human approval primitives
+- CLI approval pause/resume implementation
+- controlled predefined validation wrapper
+- deterministic finding-to-validation mapping
+- constrained LangChain Phase 3 tool
+- normalized Phase 3 results
+- conservative Gemini interpretation rules
+- Phase 3 audit module
+- same-process conversation/checkpoint persistence
+- runtime callback-address validation
+
+Remaining Phase 3 work is mainly:
+- finish/close validation of P3-09 and P3-10
+- automatically connect discovery findings to the Test Framework candidate lookup in normal orchestration (P3-13)
+- introduce reusable typed profile/parameter ownership architecture and runtime listener-port allocation (P3-14)
+- add validation-session lifecycle, proof artifact, and explicit human handoff (P3-15)
+- then run/update the final consolidated end-to-end Phase 3 acceptance workflow (P3-11)
+
+======================================================================
+11. ALL CURRENTLY OPEN GITHUB ISSUES
+======================================================================
+
+At this snapshot there are 34 open issues.
+
+---------------------------------------------------------------------
+A. DOCUMENTATION / HOUSEKEEPING
+---------------------------------------------------------------------
+
+#15 — P1-15 Document Phase 1 architecture and usage
+Status: OPEN
+State of work: documentation backlog.
+Purpose: expand README/setup/architecture/limitations documentation.
+Important: README is currently stale and still says Phase 1, so this should eventually become broader project documentation rather than only historical Phase 1 notes.
+Planned completion: update README after the current Phase 3 architecture settles, documenting current project structure, setup, CLI, tool flow, environment variables, limitations, and authorized-lab statement.
+
+---------------------------------------------------------------------
+B. COSMETIC CLI IDEAS — DEFER UNTIL CORE WORK IS COMPLETE
+---------------------------------------------------------------------
+
+#27 — IDEA — Dancing ASCII progress animation
+#28 — IDEA — Runner ASCII progress animation
+#29 — IDEA — Radar sweep ASCII progress animation
+#30 — IDEA — Pac-Man style ASCII progress animation
+#31 — IDEA — Hacker typing ASCII progress animation
+#32 — IDEA — Matrix-style ASCII progress animation
+#33 — IDEA — Stage-specific CLI animations
+
+Status: all OPEN.
+Priority: low/cosmetic.
+Planned completion: do not spend core engineering time on these until Phase 3/4 functionality is stable. If implemented later, keep them strictly in the presentation layer and never couple animation logic to tool-selection or authorization behavior.
+
+---------------------------------------------------------------------
+C. PHASE 3 — IMPLEMENTATION EXISTS BUT ISSUE STILL NEEDS VALIDATION/CLOSURE
+---------------------------------------------------------------------
+
+#42 — P3-09 Add Phase 3 logging, audit context, and failure handling
+Status: OPEN.
+Implementation: already present in src/pentaia/phase3_audit.py plus related changes/tests.
+What remains according to issue checklist:
+- confirm P3-09 audit tests pass locally
+- confirm updated Phase 3 tool/approval tests remain green
+- confirm full regression suite remains green
+
+Planned completion:
+1. run tests/test_phase3_audit.py
+2. run tests/test_phase3_tools.py
+3. run tests/test_cli_approval.py
+4. run full pytest suite
+5. record actual results in issue
+6. close issue if green
+
+Because the full suite was reported green after P3-12, this issue may already be technically satisfied; GitHub just has not been updated/closed. Verify rather than assume.
+
+#48 — P3-10 CLI approval integration — explicit pause / approve / reject / resume
+Status: OPEN.
+Implementation: code is already implemented across cli_approval.py, graph.py, __init__.py, and tests.
+What remains according to issue checklist:
+- local P3-10 tests
+- existing approval/tool regression
+- full suite
+- manual CLI reject path
+- manual CLI approve/resume path
+
+Planned completion:
+1. run tests/test_cli_approval.py
+2. run tests/test_approval.py
+3. run tests/test_phase3_tools.py
+4. run full pytest
+5. manually confirm Reject produces no state-changing execution
+6. manually confirm Approve resumes only exact proposal
+7. post results and close
+
+P3-12 already improved same-thread resume behavior, so P3-10 validation should be repeated against the current code rather than the earlier implementation snapshot.
+
+---------------------------------------------------------------------
+D. PHASE 3 — FINAL/REMAINING ENGINEERING
+---------------------------------------------------------------------
+
+#70 — P3-13 Automatically check Test Framework for supported validation candidates and require human approval
+Status: OPEN.
+Purpose: connect normalized discovery findings to validation_mapping.py automatically instead of requiring the user/model to manually know that a supported validation candidate exists.
+
+Desired behavior:
+normalized finding
+  -> deterministic Test Framework lookup
+  -> if unsupported: report only, never guess
+  -> if supported: expose code-owned candidate to Gemini
+  -> Gemini may recommend it
+  -> explicit human approval is still required
+  -> existing authorization/exact-proposal/wrapper gates still apply
+
+Planned completion:
+1. add a post-discovery orchestration step in graph.py or a dedicated node/service
+2. feed normalized findings into validation_mapping.py
+3. produce only code-owned ValidationCandidate objects
+4. expose candidate context to Gemini as evidence/recommendation context
+5. ensure recommendation alone never executes
+6. maintain one exact approval flow per state-changing proposal
+7. add mocked/local tests for supported, unsupported, stale, reject, approve, and multiple-finding cases
+8. run full regression suite
+
+Recommended next major coding task: P3-13.
+
+#71 — P3-14 Add typed parameter and scan-profile architecture across discovery tools and Test Framework
+Status: OPEN.
+Purpose: generalize the parameter model so the LLM requests semantic capabilities, not native flags.
+
+Core design:
+- model-selectable semantic parameters
+- runtime-owned parameters
+- code-owned constants/defaults
+
+Examples of semantic requests:
+- scan profile
+- service/version identification boolean
+- OS identification boolean
+- bounded port selection
+- severity/filter selection
+- timeout/profile selection
+
+Do NOT add generic model-visible fields such as:
+- extra_args
+- raw_options
+- command
+- native_flags
+
+P3-14 also owns runtime listener resource management.
+Planned runtime configuration direction:
+- PENTAIA_LHOST
+- PENTAIA_LPORT_MIN
+- PENTAIA_LPORT_MAX
+
+Planned listener/port manager responsibilities:
+- reserve available port from approved pool
+- prevent collisions
+- bind reservation to session/proposal
+- show exact resolved listener address/port BEFORE approval
+- keep same approved port through execution
+- release on reject/expiry/failure/completion
+- support multiple concurrent sessions
+- fail safely when pool exhausted
+
+Planned completion:
+1. define reusable parameter/schema metadata model
+2. refactor discovery tools into approved profiles/typed parameters
+3. refactor Test Framework entries to action-specific schemas
+4. explicitly tag parameter ownership: model/runtime/code
+5. add runtime listener/port manager
+6. reserve material runtime values before approval
+7. include all material values in proposal signature
+8. add unit tests for profile translation, ownership enforcement, stale approval, port reservation/release/collision/exhaustion
+9. run full regression suite
+
+Dependency: implement after P3-13, before P3-15.
+
+#72 — P3-15 Add interactive validation-session lifecycle, verification artifacts, and human handoff
+Status: OPEN.
+Purpose: manage supported validation actions that establish an interactive session without granting unrestricted session control to Gemini.
+
+Planned features:
+- Validation Session Manager
+- unique PentAiA validation session ID
+- runtime session lifecycle
+- backend session persistence, initially tmux is preferred
+- predefined harmless proof/verification artifact for supported actions
+- proactive user-visible session details
+- explicit human takeover/handoff
+- bounded retention and cleanup
+- audit of session lifecycle
+
+Important control boundary:
+Gemini may recommend a supported action, but must not gain arbitrary interactive control after a session is created.
+
+Proposed lifecycle concept:
+reserved -> approved -> active -> verified -> handed_off/completed/failed/expired/closed
+
+Proof artifact concept:
+- path and content are code-owned
+- creation is approval-bound
+- result/path are reported to the user
+- failure must not be treated as success
+- cleanup is controlled/auditable
+
+Human handoff concept:
+- user explicitly chooses handoff
+- session becomes handed_off
+- Gemini stops automated interaction through that session
+- user can attach through a PentAiA-owned interface
+
+Potential operator interface:
+- pentaia session list
+- pentaia session show <session-id>
+- pentaia session attach <session-id>
+- pentaia session close <session-id>
+
+Planned completion:
+1. consume P3-14 listener reservation resources
+2. create Validation Session Manager
+3. add backend session abstraction, initially tmux
+4. extend Test Framework action metadata for interactive-session/proof/handoff capability
+5. implement code-owned verification artifact behavior
+6. add explicit handoff state and prevent further agent use after handoff
+7. implement session list/show/attach/close UX
+8. implement expiry/cleanup/resource release
+9. add lifecycle audit events
+10. add mocked/local tests first
+11. later run authorized-lab end-to-end validation
+
+Dependencies: P3-13 and P3-14.
+
+#43 — P3-11 Perform end-to-end human-approved Phase 3 validation test
+Status: OPEN.
+Purpose: final Phase 3 acceptance test.
+
+This issue was created before P3-13/P3-14/P3-15 were added, so it should now be treated as the FINAL CONSOLIDATED Phase 3 acceptance test rather than run prematurely.
+
+Existing P3-11 scenarios already include:
+- reject path
+- approve/resume path
+- local callback/listener validation
+- session persistence within same CLI process
+- unsupported finding
+- unauthorized target
+- protected-target guard through automated tests
+- missing approval
+- stale approval
+- invalid/missing runtime callback configuration
+- controlled execution failure
+- inconclusive completion
+
+Recommended updated completion plan:
+Run P3-11 only after P3-13, P3-14, and P3-15 are implemented and tested. Update the issue checklist to include the new automatic candidate lookup, typed parameter ownership, listener-port reservation, validation-session lifecycle, proof artifact, and human handoff behavior. Then use P3-11 as the consolidated Phase 3 sign-off.
+
+---------------------------------------------------------------------
+E. PHASE 4 — WEB GUI, AUTHENTICATION, ACCOUNTING, RECOVERY
+---------------------------------------------------------------------
+
+All Phase 4 issues are currently OPEN and should be treated as backlog until Phase 3 is signed off.
+
+#51 — P4-01 Define Phase 4 web, identity, accounting, and CLI security architecture
+Planned completion: first Phase 4 task. Finalize browser -> GUI -> FastAPI -> LangGraph boundaries, identity trust model, accounting model, and local break-glass CLI design.
+
+#52 — P4-02 Introduce FastAPI backend layer for the web application
+Planned completion: build backend application/lifecycle, health/status route, authenticated conversation service boundary, and preserve CLI.
+
+#53 — P4-03 Build initial PentAiA web GUI shell
+Planned completion: responsive login/application shell, conversation workspace, navigation, approval placeholder, minimal status view.
+
+#54 — P4-04 Implement authenticated user identity and secure web session model
+Planned completion: normalized user identity, auth-source tracking, server-side web sessions, logout/invalidation, user-to-conversation mapping, credentials excluded from agent state.
+
+#55 — P4-05 Implement Active Directory authentication over LDAPS
+Planned completion: AD/LDAPS provider, TLS validation, normalized identity mapping, secure credential handling, tests.
+
+#56 — P4-06 Implement RADIUS authentication backend
+Planned completion: RADIUS/NPS/FreeRADIUS provider, timeout/reject/unavailable handling, normalized identity, shared-secret protection, tests.
+
+#57 — P4-07 Add configurable authentication provider selection
+Planned completion: configuration-driven ad/radius selection, startup validation, common provider contract, safe status exposure.
+
+#58 — P4-08 Harden web session management and login security controls
+Planned completion: Secure/HttpOnly/SameSite cookies, expiry/idle timeout, CSRF protection where needed, rate limiting, generic errors, session fixation protection, tests.
+
+#59 — P4-09 Implement application-level accounting and audit event subsystem
+Planned completion: structured event schema tracking user/session/conversation/tool/approval/outcome with secrets excluded; storage/query/retention hooks.
+
+#60 — P4-10 Add accounting and audit viewer to the web GUI
+Planned completion: filtered/paginated GUI over P4-09 events with consistent redaction.
+
+#61 — P4-11 Integrate authenticated web conversations with LangGraph sessions
+Planned completion: map web conversation IDs to LangGraph thread IDs, enforce session isolation, correlate accounting, preserve CLI behavior.
+
+#62 — P4-12 Integrate human approval workflow into the web GUI
+Planned completion: render exact proposal, explicit Approve/Reject buttons, bind decision to authenticated identity, keep stale approval and downstream controls unchanged.
+
+#63 — P4-13 Add authenticated conversation history and session visibility
+Planned completion: show active/recent in-memory/checkpointed conversations, safe reopening, ownership isolation, clear distinction from Phase 5 cross-restart persistence.
+
+#64 — P4-14 Add local pentaia-admin recovery utility and disabled-by-default break-glass CLI
+Planned completion: local/sudo-only fixed admin operations for status, config validation, auth connectivity, service recovery, web-session invalidation, and explicit enable/disable of normal pentaia CLI. No arbitrary commands and no agent/LLM functionality in pentaia-admin.
+
+#65 — P4-15 Add minimal Phase 4 admin/status page and typed operational settings
+Planned completion: safe system/auth status plus only necessary typed non-secret operational settings. No raw .env editor.
+
+#66 — P4-16 Perform end-to-end Active Directory authentication validation
+Planned completion: real configured AD/LDAPS validation after P4 auth/session/accounting integration is ready.
+
+#67 — P4-17 Perform end-to-end RADIUS authentication validation
+Planned completion: real configured RADIUS validation after provider integration is ready.
+
+#68 — P4-18 Perform complete Phase 4 GUI, identity, accounting, and approval validation
+Planned completion: final Phase 4 end-to-end acceptance after #66/#67 and core GUI/accounting/approval work.
+
+#69 — P4-19 Write Phase 4 deployment, authentication, accounting, and recovery documentation
+Planned completion: final deployment/operations/recovery documentation after Phase 4 behavior is stable.
+
+Recommended Phase 4 implementation order:
+
+1. #51 architecture
+2. #52 FastAPI backend foundation
+3. #54 identity/session model
+4. #55 AD provider + #56 RADIUS provider
+5. #57 provider selection
+6. #58 web-session/login hardening
+7. #59 accounting/audit backend
+8. #53 GUI shell (can begin in parallel after API contract stabilizes)
+9. #61 authenticated LangGraph conversations
+10. #62 web approval flow
+11. #63 conversation history visibility
+12. #64 pentaia-admin + break-glass CLI policy
+13. #65 minimal admin/status page
+14. #60 audit/accounting viewer
+15. #66 AD E2E validation
+16. #67 RADIUS E2E validation
+17. #68 full Phase 4 E2E validation
+18. #69 documentation
+
+Some UI work can be parallelized, but identity/session/accounting contracts should be decided before deep GUI coupling.
+
+---------------------------------------------------------------------
+F. PHASE 5 — ENHANCEMENTS
+---------------------------------------------------------------------
+
+#50 — P5-01 Add persistent memory across CLI sessions and restarts
+Status: OPEN.
+Priority: Phase 5 backlog after Phase 4.
+
+Current state:
+LangGraph uses an in-memory checkpointer. Same running process can preserve session context; restart loses it.
+
+Planned Phase 5 behavior:
+- select LangGraph-compatible persistent storage/checkpointer
+- likely evaluate SQLite first for simple local/single-user deployment
+- resume sessions after restart
+- preserve session/user isolation
+- list/resume/delete stored sessions
+- retention/cleanup policy
+- ensure approvals cannot be silently reused after restart
+- keep secrets out of persisted state
+- fail safely or use documented fallback if storage unavailable
+
+Do not implement this early unless required by a Phase 4 architectural dependency. Phase 4 explicitly distinguishes current in-process history from durable Phase 5 persistence.
+
+======================================================================
+12. RECOMMENDED CURRENT COMPLETION ORDER
+======================================================================
+
+Recommended immediate sequence from the current codebase:
+
+STEP 1 — Repository/test hygiene
+- run full pytest suite
+- confirm exact current pass count
+- validate and close #42 P3-09 if all checks pass
+- validate manual Reject/Approve behavior and close #48 P3-10
+- optionally update #15/README enough to stop advertising Phase 1 as current state
+
+STEP 2 — Implement #70 P3-13
+Automatic deterministic Test Framework lookup after discovery.
+This fixes the current usability gap where the agent may say it needs normalized evidence/approval context but does not automatically connect discovered findings to supported validation candidates.
+
+STEP 3 — Implement #71 P3-14
+Create the reusable typed parameter/profile ownership system and listener-port manager.
+This should become the common parameter architecture for discovery and Test Framework actions before more actions are added.
+
+STEP 4 — Implement #72 P3-15
+Add validation session lifecycle, proof artifact, backend session management, and explicit human handoff on top of P3-14 resources.
+
+STEP 5 — Complete #43 P3-11 as final Phase 3 acceptance
+Update P3-11 to cover P3-13/P3-14/P3-15 behavior and perform the final authorized-lab end-to-end workflow.
+
+STEP 6 — Close Phase 3 documentation gap
+Update README/project docs so architecture, configuration, testing, and phase boundaries reflect actual implementation.
+
+STEP 7 — Begin Phase 4 using #51 architecture first
+Do not jump directly to GUI coding before finalizing identity/session/accounting boundaries.
+
+STEP 8 — Phase 5 persistence and broader administration/RBAC enhancements later
+
+======================================================================
+13. TESTING / DEVELOPMENT WORKFLOW
+======================================================================
+
+Standard project commands:
+
+Install/sync environment:
+uv sync
+
+Run CLI:
+uv run pentaia
+
+Run all tests:
+uv run pytest -v
+
+Run linting:
+uv run ruff check .
+
+Useful Phase 3 focused tests include:
+
+uv run pytest tests/test_authorization.py -v
+uv run pytest tests/test_approval.py -v
+uv run pytest tests/test_cli_approval.py -v
+uv run pytest tests/test_cli_session.py -v
+uv run pytest tests/test_metasploit_check.py -v
+uv run pytest tests/test_metasploit_wrapper.py -v
+uv run pytest tests/test_validation_mapping.py -v
+uv run pytest tests/test_phase3_tools.py -v
+uv run pytest tests/test_phase3_results.py -v
+uv run pytest tests/test_phase3_audit.py -v
+uv run pytest tests/test_runtime_config.py -v
+
+Before changing architecture, always run the full test suite and preserve existing behavior unless the GitHub issue explicitly changes the contract.
+
+======================================================================
+14. CURRENT LAB / DEVELOPMENT CONTEXT
+======================================================================
+
+The project has been developed and tested in a private controlled home lab.
+
+Known architecture from prior project work:
+- Build host runs PentAiA development environment
+- separate Kali VM performs remote tool execution over SSH
+- intentionally vulnerable lab VM is used for authorized testing
+- network/protected-target policy exists so Phase 3 state-changing actions are fail-closed
+
+Do not hard-code lab IP addresses into reusable application logic. Use configuration and existing authorization controls.
+
+The project owner performs live/manual testing locally. Coding changes should include clear local test instructions so the owner can execute tests and report results.
+
+======================================================================
+15. IMPORTANT CURRENT DESIGN DECISIONS
+======================================================================
+
+1. FastAPI was intentionally excluded from the original early phases.
+   It is now planned for Phase 4 when the web/multi-user boundary is required.
+
+2. CLI remains important.
+   In Phase 4, GUI becomes the normal operational interface while CLI becomes a disabled-by-default local break-glass interface.
+
+3. A separate pentaia-admin utility is planned.
+   It must be local-only, privilege-controlled, fixed-function, and must not contain agent/LLM or arbitrary command execution features.
+
+4. Authentication and authorization are intentionally separated.
+   Phase 4 handles authentication + accounting.
+   Broader RBAC/authorization administration is deferred beyond the initial Phase 4 scope.
+
+5. AD/LDAPS and RADIUS are both planned authentication backends.
+
+6. Persistent memory across application restart is Phase 5, not current Phase 3/4 session behavior.
+
+7. The Test Framework must remain deterministic.
+   Code decides whether a supported validation exists.
+   Gemini may explain/recommend it.
+   Human approval decides whether state-changing execution proceeds.
+
+8. Exact runtime-owned listener values must eventually be shown BEFORE approval.
+   P3-14 owns listener address/port allocation and proposal binding.
+
+9. Interactive sessions, if supported, remain code-managed.
+   P3-15 must not turn an established session into an unrestricted Gemini shell.
+
+======================================================================
+16. KNOWN REPOSITORY / TRACKING CLEANUP
+======================================================================
+
+- README current-phase text is stale.
+- #42 P3-09 appears implemented but remains open pending recorded test confirmation.
+- #48 P3-10 appears implemented but remains open pending recorded tests/manual validation.
+- #49 P3-12 is closed and records 69 passed as its regression baseline.
+- #73 was a duplicate/alternate P3-15 issue and is closed; use OPEN issue #72 as the active P3-15 work item.
+- Cosmetic animation issues #27-#33 should not distract from Phase 3 completion.
+- Some older closed issue bodies may contain stale unchecked subtasks even though the issue itself is closed; use current code/tests and newer issues as the source of truth.
+
+======================================================================
+17. HANDOFF GUIDANCE FOR THE NEXT AI/DEVELOPER
+======================================================================
+
+When continuing this project:
+
+1. Read this file.
+2. Read the active GitHub issue being implemented in full.
+3. Inspect the current code before writing replacements.
+4. Preserve existing tests and control boundaries.
+5. Prefer small, testable commits aligned to one GitHub issue.
+6. Add tests for every new control/state transition.
+7. Never expose generic command/raw option fields to Gemini.
+8. Never let Gemini create its own approval state.
+9. Never treat process success as proof of security impact without evidence.
+10. Keep all live validation restricted to the project owner's explicitly authorized lab.
+11. The project owner will run local/live tests; provide exact commands and expected behavior.
+12. Update the corresponding GitHub issue with implementation details and test results after work is verified.
+
+If beginning work immediately, start with:
+
+P3-13 / GitHub issue #70
+
+Goal:
+Wire normalized discovery findings into the existing deterministic validation_mapping/Test Framework so supported candidates become automatically available for Gemini to recommend, while unsupported findings remain report-only and every state-changing action still requires the existing explicit human approval, authorization, exact-signature, and controlled-wrapper checks.
+
+======================================================================
+END OF PROJECT HANDOFF SUMMARY
+======================================================================
