@@ -159,15 +159,19 @@ def _require_current_runtime_parameters(
             )
 
 
-def _build_command(
+def build_resource_script(
     operation: MetasploitOperation,
     target: str,
     parameters: dict[str, Any],
 ) -> str:
+    """Build the code-owned Metasploit resource script, without the run command.
+
+    Every token comes from a code-owned constant or an already validated
+    typed/runtime-owned value. No arbitrary commands are accepted. Callers append
+    the run/exit behaviour they need.
+    """
     rport = parameters["rport"]
 
-    # Every token in this resource script comes from code-owned constants or
-    # already validated typed/runtime-owned values. No arbitrary commands are accepted.
     resource_script = (
         f"use {operation.module}; "
         f"set RHOSTS {target}; "
@@ -191,6 +195,31 @@ def _build_command(
 
     if not operation.auto_check:
         resource_script += "set AutoCheck false; "
+
+    return resource_script
+
+
+def build_live_console_script(
+    operation: MetasploitOperation,
+    target: str,
+    parameters: dict[str, Any],
+) -> str:
+    """Build a resource script that leaves the console alive for human takeover.
+
+    Unlike the bounded one-shot run, this omits ``exit -y`` so a console held by
+    a detached tmux session keeps its handler and the caught session alive. It
+    still uses ``-z`` so the console does not block interacting with the session;
+    the operator attaches and selects it explicitly.
+    """
+    return build_resource_script(operation, target, parameters) + "run -z"
+
+
+def _build_command(
+    operation: MetasploitOperation,
+    target: str,
+    parameters: dict[str, Any],
+) -> str:
+    resource_script = build_resource_script(operation, target, parameters)
 
     # "-z" stops msfconsole switching into interactive session mode once the
     # shell opens. Without it, the console reads stdin, hits EOF (PentAiA closes
