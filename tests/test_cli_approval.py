@@ -22,7 +22,7 @@ def _proposal() -> Phase3ActionProposal:
         target="172.16.0.64",
         rationale="normalized source evidence",
         expected_effect="controlled validation",
-        parameters={"rport": 21, "lhost": "172.16.0.13"},
+        parameters={"rport": 21, "lhost": "172.16.0.13", "lport": 4444},
     )
 
 
@@ -159,7 +159,7 @@ def test_stale_approval_signature_changes_with_proposal() -> None:
         target=original.target,
         rationale=original.rationale,
         expected_effect=original.expected_effect,
-        parameters={"rport": 22, "lhost": "172.16.0.13"},
+        parameters={"rport": 22, "lhost": "172.16.0.13", "lport": 4444},
     )
 
     assert original.signature() != changed.signature()

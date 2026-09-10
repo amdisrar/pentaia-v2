@@ -75,10 +75,17 @@ def run_command(command: str, timeout: int = 30) -> tuple[str, str, int]:
                 timeout,
             )
 
-            _, stdout, stderr = client.exec_command(
+            stdin, stdout, stderr = client.exec_command(
                 command,
                 timeout=timeout,
             )
+
+            # PentAiA never writes to a remote command's stdin, so leaving the
+            # channel open only creates a way to hang. Anything that reads stdin
+            # -- an interactive Metasploit session handler, for example -- would
+            # block until the timeout bound fired instead of returning its
+            # result. Closing the stream delivers EOF immediately.
+            stdin.close()
 
             exit_code = stdout.channel.recv_exit_status()
             stdout_text = stdout.read().decode().strip()

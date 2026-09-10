@@ -14,6 +14,7 @@ from pentaia.phase3_tools import (
 @pytest.fixture(autouse=True)
 def configured_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+    monkeypatch.setenv("PENTAIA_LPORT", "4444")
 
 
 def test_tool_schema_hides_injected_approval() -> None:
@@ -74,7 +75,7 @@ def test_helper_routes_exact_proposal_to_controlled_wrapper(
     assert proposal.target == "172.16.0.64"
     assert proposal.rationale == "mapped normalized evidence"
     assert proposal.expected_effect == "controlled validation"
-    assert proposal.parameters == {"rport": 21, "lhost": "172.16.0.13"}
+    assert proposal.parameters == {"rport": 21, "lhost": "172.16.0.13", "lport": 4444}
     assert captured["approval"] is approval
     assert payload["status"] == "success"
     assert payload["changes_state"] is True

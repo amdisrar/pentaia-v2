@@ -9,6 +9,11 @@ from pentaia.phase3_audit import user_safe_failure_message
 from pentaia.phase3_tools import _run_phase3_validation_tool
 
 
+@pytest.fixture(autouse=True)
+def fixed_listener_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PENTAIA_LPORT", "4444")
+
+
 def _tool_call() -> dict:
     return {
         "name": "phase3_controlled_validation",
@@ -34,6 +39,7 @@ def test_valid_runtime_callback_is_added_to_exact_proposal(
     assert proposal.parameters == {
         "rport": 21,
         "lhost": "172.16.0.13",
+        "lport": 4444,
     }
 
 

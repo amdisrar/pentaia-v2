@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from pentaia.approval import (
     Phase3ActionProposal,
     approve_phase3_action,
@@ -8,6 +10,7 @@ from pentaia.approval import (
 from pentaia.metasploit_wrapper import MetasploitExecutionResult
 from pentaia.phase3_results import (
     PHASE3_INTERPRETATION_RULES,
+    evidence_demonstrates_expected_effect,
     normalize_phase3_result,
 )
 
@@ -30,13 +33,16 @@ def _approved(proposal: Phase3ActionProposal):
     )
 
 
-def _execution(exit_code: int = 0) -> MetasploitExecutionResult:
+def _execution(
+    exit_code: int = 0,
+    stdout: str = "operation completed",
+) -> MetasploitExecutionResult:
     return MetasploitExecutionResult(
         action_id="validate_vsftpd_234_backdoor",
         target="172.16.0.64",
         module="code-owned-module",
         parameters={"rport": 21},
-        stdout="operation completed",
+        stdout=stdout,
         stderr="",
         exit_code=exit_code,
     )
@@ -136,3 +142,77 @@ def test_interpretation_rules_prevent_exit_code_overstatement() -> None:
     assert "exit_code=0" in PHASE3_INTERPRETATION_RULES
     assert "inconclusive" in PHASE3_INTERPRETATION_RULES
     assert "Do not claim impact" in PHASE3_INTERPRETATION_RULES
+
+
+# --- evidence classifier ---------------------------------------------------
+#
+# A clean process exit must never become a success claim on its own. An outcome
+# is upgraded only when returned evidence demonstrates the expected effect.
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "stdout: [+] UID: uid=0(root) gid=0(root) groups=0(root)",
+        "stdout: [*] Meterpreter session 1 opened (172.16.0.13:4444 -> ...)",
+        "stdout: [*] Command shell session 2 opened",
+    ],
+)
+def test_demonstrated_evidence_classifies_as_success(evidence: str) -> None:
+    assert evidence_demonstrates_expected_effect(evidence) is True
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "",
+        "stdout: operation completed",
+        "stdout: Exploit completed, but no session was created.",
+        "stdout: uid=1000(user)",
+    ],
+)
+def test_non_demonstrated_evidence_does_not_classify_as_success(evidence: str) -> None:
+    assert evidence_demonstrates_expected_effect(evidence) is False
+
+
+def test_demonstrated_evidence_upgrades_outcome_to_success() -> None:
+    proposal = _proposal()
+    result = normalize_phase3_result(
+        proposal=proposal,
+        approval=_approved(proposal),
+        tool_status="success",
+        execution_result=_execution(
+            0,
+            stdout="[+] UID: uid=0(root) gid=0(root) groups=0(root)",
+        ),
+    )
+
+    assert result.execution_status == "completed"
+    assert result.outcome == "success"
+    assert "uid=0(root)" in result.evidence
+
+
+def test_missing_evidence_keeps_clean_exit_inconclusive() -> None:
+    proposal = _proposal()
+    result = normalize_phase3_result(
+        proposal=proposal,
+        approval=_approved(proposal),
+        tool_status="success",
+        execution_result=_execution(0, stdout="Exploit completed, but no session was created."),
+    )
+
+    # Exit code 0 alone must never be reported as a demonstrated validation.
+    assert result.exit_code == 0
+    assert result.outcome == "inconclusive"
+
+
+def test_evidence_classifier_does_not_upgrade_failed_execution() -> None:
+    proposal = _proposal()
+    result = normalize_phase3_result(
+        proposal=proposal,
+        approval=_approved(proposal),
+        tool_status="failed",
+        execution_result=_execution(1, stdout="uid=0(root) in an unrelated banner"),
+    )
+
+    assert result.outcome == "failed"

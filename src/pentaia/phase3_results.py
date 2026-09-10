@@ -41,15 +41,41 @@ class Phase3NormalizedResult:
         return json.dumps(self.to_dict(), sort_keys=True)
 
 
-def _compact_evidence(result: MetasploitExecutionResult | None, *, limit: int = 2000) -> str:
-    if result is None:
-        return ""
+# Code-owned evidence markers that demonstrate the predefined action actually
+# achieved its effect. A clean process exit is never sufficient on its own
+# (see PHASE3_INTERPRETATION_RULES); an outcome is upgraded to "success" only
+# when returned evidence contains one of these markers.
+SUCCESS_EVIDENCE_MARKERS: tuple[str, ...] = (
+    "uid=0(root)",
+    "meterpreter session",
+    "command shell session",
+)
 
+
+def evidence_demonstrates_expected_effect(evidence: str) -> bool:
+    """Return True only when returned evidence demonstrates the expected effect."""
+    normalized = evidence.lower()
+    return any(marker in normalized for marker in SUCCESS_EVIDENCE_MARKERS)
+
+
+def _compact_evidence(
+    result: MetasploitExecutionResult | None,
+    session_evidence: str = "",
+    *,
+    limit: int = 2000,
+) -> str:
     parts: list[str] = []
-    if result.stdout:
-        parts.append(f"stdout: {result.stdout}")
-    if result.stderr:
-        parts.append(f"stderr: {result.stderr}")
+
+    if result is not None:
+        if result.stdout:
+            parts.append(f"stdout: {result.stdout}")
+        if result.stderr:
+            parts.append(f"stderr: {result.stderr}")
+
+    # Evidence captured from PentAiA's own listener proves a session called back,
+    # which the execution output alone cannot demonstrate.
+    if session_evidence.strip():
+        parts.append(f"session: {session_evidence.strip()}")
 
     evidence = "\n".join(parts).strip()
     if len(evidence) <= limit:
@@ -63,9 +89,11 @@ def normalize_phase3_result(
     approval: Phase3ApprovalState | None,
     tool_status: str,
     execution_result: MetasploitExecutionResult | None = None,
+    session_evidence: str = "",
     error: str | None = None,
 ) -> Phase3NormalizedResult:
     approval_decision = approval.decision if approval is not None else "missing"
+    evidence = _compact_evidence(execution_result, session_evidence)
 
     if tool_status == "blocked":
         execution_status: Phase3ExecutionStatus = "not_run"
@@ -78,9 +106,14 @@ def normalize_phase3_result(
         outcome = "failed"
     elif tool_status == "success":
         execution_status = "completed"
-        # A clean process exit proves only that the predefined operation completed.
-        # Without an explicit evidence classifier, the result remains inconclusive.
-        outcome = "inconclusive"
+        # A clean process exit proves only that the predefined operation ran.
+        # The outcome is upgraded only when returned evidence demonstrates the
+        # effect, so exit_code=0 can never be reported as a successful validation.
+        outcome = (
+            "success"
+            if evidence_demonstrates_expected_effect(evidence)
+            else "inconclusive"
+        )
     else:
         raise ValueError(f"Unsupported Phase 3 tool status: {tool_status}")
 
@@ -92,7 +125,7 @@ def normalize_phase3_result(
         execution_status=execution_status,
         outcome=outcome,
         exit_code=execution_result.exit_code if execution_result is not None else None,
-        evidence=_compact_evidence(execution_result),
+        evidence=evidence,
         source_tool="phase3_controlled_validation",
         originating_finding_reference=proposal.rationale,
         error=error,
