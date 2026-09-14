@@ -387,6 +387,32 @@ def test_metadata_that_never_applies_is_reported(
     assert any("could not be recorded" in record.getMessage() for record in caplog.records)
 
 
+def test_close_reports_when_missing_metadata_skips_the_port_release(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A skipped release must be visible, not identical to one that found nothing."""
+    _install_fake_run_command(
+        monkeypatch,
+        sessions=[_row(target="", action="", lport="", rport="")],
+    )
+    released: list[dict] = []
+    monkeypatch.setattr(
+        phase3_session,
+        "release_listener_port",
+        lambda **kwargs: released.append(kwargs) or True,
+    )
+
+    with caplog.at_level("WARNING", logger="pentaia.phase3_session"):
+        result = close_live_session(NAME)
+
+    assert released == []
+    assert result.port_released is False
+    assert any(
+        "reason=missing_metadata" in record.getMessage() for record in caplog.records
+    )
+
+
 # --- lifecycle audit -------------------------------------------------------
 
 

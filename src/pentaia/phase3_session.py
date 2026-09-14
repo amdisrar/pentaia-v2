@@ -801,7 +801,19 @@ def close_live_session(
 
     port_released = False
 
-    if held is not None and held.action_id and held.target:
+    if held is None:
+        # The console is already gone, so there is nothing left holding the port.
+        logger.info(
+            "Phase 3 close found no held session to release a port for session=%s", name
+        )
+    elif not (held.action_id and held.target):
+        # Without the action and target the reservation cannot be identified. Say so:
+        # a silently skipped release looks identical to a release that found nothing.
+        logger.warning(
+            "Phase 3 close skipped the port release session=%s reason=missing_metadata",
+            name,
+        )
+    else:
         try:
             rport = int(held.rport)
         except (TypeError, ValueError):
