@@ -259,3 +259,137 @@ def test_prompt_without_a_note_has_no_note_line() -> None:
     rendered = format_approval_prompt(create_pending_approval(_proposal()))
 
     assert "Note:" not in rendered
+
+
+# --- malformed proposals must fail safely --------------------------------
+#
+# The approval gate reads the model's raw tool call, before any schema
+# validation, so an incomplete or wrongly typed proposal is reachable. It must
+# produce a safe blocked result rather than raising and killing the turn.
+
+
+def _ai_message_with(args: dict) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "phase3_controlled_validation",
+                "args": args,
+                "id": "call-malformed",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _full_args() -> dict:
+    return {
+        "action_id": "validate_vsftpd_234_backdoor",
+        "target": "172.16.0.64",
+        "rationale": "normalized source evidence",
+        "expected_effect": "controlled validation",
+        "rport": 21,
+    }
+
+
+def test_proposal_is_built_from_a_complete_tool_call() -> None:
+    from pentaia.graph import _proposal_from_tool_call
+
+    proposal = _proposal_from_tool_call(_ai_message_with(_full_args()).tool_calls[0])
+
+    assert proposal is not None
+    assert proposal.target == "172.16.0.64"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["action_id", "target", "rationale", "expected_effect", "rport"],
+)
+def test_incomplete_tool_calls_produce_no_proposal(missing: str) -> None:
+    from pentaia.graph import _proposal_from_tool_call
+
+    args = _full_args()
+    args.pop(missing)
+
+    assert _proposal_from_tool_call(_ai_message_with(args).tool_calls[0]) is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"rport": "21"},
+        {"rport": 0},
+        {"action_id": "arbitrary_msfconsole"},
+        {"extra": "field"},
+    ],
+)
+def test_invalid_tool_calls_produce_no_proposal(override: dict) -> None:
+    from pentaia.graph import _proposal_from_tool_call
+
+    args = {**_full_args(), **override}
+
+    assert _proposal_from_tool_call(_ai_message_with(args).tool_calls[0]) is None
+
+
+def test_gate_blocks_an_incomplete_proposal_instead_of_crashing() -> None:
+    """The regression this guard exists for: KeyError('rationale') killed the turn."""
+    args = _full_args()
+    args.pop("rationale")
+
+    result = approval_gate_node({"messages": [_ai_message_with(args)]})
+
+    assert result["pending_approval"] is None
+    assert "invalid_proposal" in result["messages"][0].content
+
+
+def test_gate_returns_to_the_agent_after_blocking(state: dict | None = None) -> None:
+    from pentaia.graph import route_from_approval_gate
+
+    assert route_from_approval_gate({"pending_approval": None}) == "agent"
+
+
+def test_gate_ends_the_turn_when_approval_is_pending() -> None:
+    from langgraph.graph import END
+
+    from pentaia.graph import route_from_approval_gate
+
+    result = approval_gate_node({"messages": [_tool_message()]})
+
+    assert result["pending_approval"] is not None
+    assert route_from_approval_gate(result) == END
+
+
+def test_gate_blocks_two_state_changing_calls_together() -> None:
+    """Two simultaneous proposals are refused, not silently reduced to one."""
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "phase3_controlled_validation",
+                "args": _full_args(),
+                "id": f"call-{index}",
+                "type": "tool_call",
+            }
+            for index in range(2)
+        ],
+    )
+
+    result = approval_gate_node({"messages": [message]})
+
+    assert result["pending_approval"] is None
+    assert len(result["messages"]) == 2
+    assert all("invalid_proposal" in m.content for m in result["messages"])
+
+
+def test_target_validity_is_enforced_at_execution_not_at_the_gate() -> None:
+    """The gate deliberately does not duplicate target authorization.
+
+    An out-of-policy target is still proposed, and the wrapper rechecks
+    authorization immediately before anything executes, so it fails closed there
+    rather than here.
+    """
+    from pentaia.graph import _proposal_from_tool_call
+
+    args = {**_full_args(), "target": "not-an-ip"}
+
+    assert _proposal_from_tool_call(_ai_message_with(args).tool_calls[0]) is not None

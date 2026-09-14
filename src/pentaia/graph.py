@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 STATE_CHANGING_TOOL_NAME = "phase3_controlled_validation"
 
+# The only arguments a Phase 3 proposal may carry. Anything else is refused, so
+# a stray model-supplied field cannot reach the approval prompt.
+PHASE3_TOOL_ARGUMENTS = frozenset(
+    {"action_id", "target", "rationale", "expected_effect", "rport"}
+)
+
 SYSTEM_MESSAGE = SystemMessage(
     content=(
         "You are PentAiA, an AI-assisted penetration-testing agent for authorized lab systems. "
@@ -142,16 +148,43 @@ def _state_changing_calls(state: AgentState) -> list[dict]:
     ]
 
 
-def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
-    args = call.get("args", {})
-    action_id = args["action_id"]
-    parameters = prepare_metasploit_parameters(
-        action_id,
-        {"rport": args["rport"]},
-        target=args["target"],
-    )
+def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal | None:
+    """Build the exact proposal, or None when the tool call is not usable.
+
+    The model's raw tool call is read here, before any schema validation, so it can
+    be incomplete or wrongly typed. A malformed proposal must fail safely -- the
+    agent is told the request was rejected and nothing executes -- rather than
+    raising and taking down the whole turn.
+    """
+    args = call.get("args")
+    if not isinstance(args, dict):
+        return None
+
+    # The model may supply only the typed, known arguments. Anything else is
+    # refused rather than silently dropped, so an unexpected field can never be
+    # mistaken for something PentAiA honoured.
+    if set(args) != PHASE3_TOOL_ARGUMENTS:
+        logger.warning(
+            "Phase 3 proposal rejected reason=unexpected_args unexpected=%s",
+            sorted(set(args) - PHASE3_TOOL_ARGUMENTS),
+        )
+        return None
+
+    try:
+        parameters = prepare_metasploit_parameters(
+            args["action_id"],
+            {"rport": args["rport"]},
+            target=args["target"],
+        )
+    except (ValueError, RuntimeError) as exc:
+        logger.warning(
+            "Phase 3 proposal rejected reason=invalid_args error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
     return Phase3ActionProposal(
-        action_id=action_id,
+        action_id=args["action_id"],
         target=args["target"],
         rationale=args["rationale"],
         expected_effect=args["expected_effect"],
@@ -159,23 +192,84 @@ def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
     )
 
 
+def _blocked_tool_messages(
+    message: AIMessage,
+    *,
+    reason: str,
+    text: str,
+) -> list[ToolMessage]:
+    """Answer every tool call with the same structured, safe blocked result."""
+    content = json.dumps(
+        {"status": "blocked", "reason": reason, "message": text},
+        sort_keys=True,
+    )
+
+    return [
+        ToolMessage(
+            content=content,
+            tool_call_id=call["id"],
+            name=call.get("name"),
+        )
+        for call in message.tool_calls
+    ]
+
+
 def _pending_call_matches_approval(state: AgentState) -> bool:
     approval = state.get("pending_approval")
     calls = _state_changing_calls(state)
     if approval is None or len(calls) != 1:
         return False
-    return _proposal_from_tool_call(calls[0]).signature() == approval.proposal.signature()
+
+    proposal = _proposal_from_tool_call(calls[0])
+
+    return proposal is not None and proposal.signature() == approval.proposal.signature()
 
 
 def approval_gate_node(state: AgentState) -> AgentState:
+    message = _last_ai_message(state)
     calls = _state_changing_calls(state)
-    if len(calls) != 1:
-        raise ValueError(
-            "Exactly one state-changing proposal may await CLI approval at a time."
-        )
+
+    if message is None or len(calls) != 1:
+        # More than one state-changing proposal in one turn must never be silently
+        # reduced to one; refuse them all rather than pick.
+        return {
+            "messages": (
+                _blocked_tool_messages(
+                    message,
+                    reason="invalid_proposal",
+                    text=(
+                        "Exactly one state-changing proposal may await approval at a "
+                        "time, and it must be the only pending action. Nothing was executed."
+                    ),
+                )
+                if message is not None
+                else []
+            ),
+            "pending_approval": None,
+        }
 
     proposal = _proposal_from_tool_call(calls[0])
+
+    if proposal is None:
+        return {
+            "messages": _blocked_tool_messages(
+                message,
+                reason="invalid_proposal",
+                text=(
+                    "The proposed action was incomplete or invalid, so PentAiA will "
+                    "not ask for approval. Provide the action id, target, rationale, "
+                    "expected effect and remote port. Nothing was executed."
+                ),
+            ),
+            "pending_approval": None,
+        }
+
     return {"pending_approval": create_pending_approval(proposal)}
+
+
+def route_from_approval_gate(state: AgentState) -> str:
+    """End the turn when an approval is pending; otherwise return to the agent."""
+    return "agent" if state.get("pending_approval") is None else END
 
 
 def _abandon_reservations(state: AgentState) -> None:
@@ -320,7 +414,14 @@ graph_builder.add_conditional_edges(
     },
 )
 
-graph_builder.add_edge("approval_gate", END)
+graph_builder.add_conditional_edges(
+    "approval_gate",
+    route_from_approval_gate,
+    {
+        "agent": "agent",
+        END: END,
+    },
+)
 graph_builder.add_edge("rejection", "agent")
 graph_builder.add_edge("stale", "agent")
 # Every discovery result passes through the deterministic candidate lookup before

@@ -162,10 +162,13 @@ def main() -> None:
             final_message = result["messages"][-1]
             print(f"{final_message.text}\n")
 
-        except Exception:
+        except Exception as exc:
             logger.exception("Unhandled PentAiA error session_id=%s", session_id)
+            # Name the failure inline: sending the operator to the log to discover
+            # what went wrong makes every fault slower to diagnose than it needs
+            # to be.
             print(
-                "\nPentAiA encountered an error. "
+                f"\nPentAiA encountered an error: {type(exc).__name__}: {exc}\n"
                 "Check logs/pentaia.log for details.\n"
             )
 
