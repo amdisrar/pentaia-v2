@@ -35,6 +35,7 @@ def _install_fake_run_command(
     sessions: list[str] | None = None,
     list_ok: bool = True,
     pane: str = "",
+    send_keys_ok: bool = True,
 ) -> list[str]:
     issued: list[str] = []
 
@@ -48,6 +49,9 @@ def _install_fake_run_command(
 
         if command.startswith("tmux capture-pane"):
             return pane, "", 0
+
+        if command.startswith("tmux send-keys"):
+            return "", "" if send_keys_ok else "no such session", 0 if send_keys_ok else 1
 
         return "", "", 0
 
@@ -277,6 +281,110 @@ def test_close_tolerates_unreadable_port_metadata(
     assert released == []
     assert result.closed is True
     assert result.artifact_removed is True
+
+
+def test_close_removes_the_marker_named_by_the_session_without_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live failure: empty metadata made cleanup delete a different file.
+
+    Deriving the marker path from metadata turned a missing target into
+    ``rm -f /tmp/pentaia-poc-e7ac0786668e.txt`` -- a file that never existed --
+    while the real marker stayed on the target and the CLI reported success.
+    """
+    issued = _install_fake_run_command(
+        monkeypatch,
+        sessions=[
+            _row(
+                target="",
+                action="",
+                lport="",
+                rport="",
+                artifact="",
+                verified="",
+                handed_off="",
+            )
+        ],
+    )
+    monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: True)
+
+    result = close_live_session(NAME)
+
+    assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
+
+    cleanup = [command for command in issued if "rm -f" in command]
+    assert len(cleanup) == 1
+    assert f"/tmp/pentaia-poc-{DIGEST}.txt" in cleanup[0]
+    # The digest of two empty strings must never be what cleanup targets.
+    assert "e7ac0786668e" not in cleanup[0]
+
+
+def test_removal_refuses_a_path_outside_the_marker_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_run_command(monkeypatch, sessions=[_row()])
+
+    for path in ("/etc/passwd", "/tmp", "", "rm -rf /"):
+        with pytest.raises(ValueError):
+            phase3_session.remove_verification_artifact(
+                console_session=NAME,
+                path=path,
+            )
+
+
+def test_close_does_not_claim_removal_when_the_console_rejects_the_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignored send-keys exit code is how a cleanup gets claimed but never sent."""
+    _install_fake_run_command(monkeypatch, sessions=[_row()], send_keys_ok=False)
+    monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: True)
+
+    result = close_live_session(NAME)
+
+    assert result.artifact_removed is False
+    assert "may still be on the target" in result.artifact_message
+
+
+# --- metadata durability ---------------------------------------------------
+
+
+def test_metadata_that_reads_back_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued = _install_fake_run_command(monkeypatch, sessions=[_row(handed_off="0")])
+
+    phase3_session.set_session_metadata(NAME, {"handed_off": 0})
+
+    writes = [command for command in issued if "set-option" in command]
+    assert len(writes) == 1
+
+
+def test_metadata_that_does_not_read_back_is_retried_per_option(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    issued = _install_fake_run_command(monkeypatch, sessions=[_row(handed_off="0")])
+
+    with caplog.at_level("WARNING", logger="pentaia.phase3_session"):
+        phase3_session.set_session_metadata(NAME, {"handed_off": 1})
+
+    writes = [command for command in issued if "set-option" in command]
+    assert len(writes) == 2
+    assert writes[1] == f"tmux set-option -t {NAME} @pentaia_handed_off 1"
+    assert any("retrying per option" in record.getMessage() for record in caplog.records)
+
+
+def test_metadata_that_never_applies_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Silent metadata loss is what made the CLI report a live session as unknown."""
+    _install_fake_run_command(monkeypatch, sessions=[_row(handed_off="0")])
+
+    with caplog.at_level("ERROR", logger="pentaia.phase3_session"):
+        phase3_session.set_session_metadata(NAME, {"handed_off": 1})
+
+    assert any("could not be recorded" in record.getMessage() for record in caplog.records)
 
 
 # --- lifecycle audit -------------------------------------------------------

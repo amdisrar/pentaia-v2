@@ -15,7 +15,6 @@ already validated (an IPv4 address, a TCP port, a sanitised session name).
 Nothing here is exposed to Gemini as a tool.
 """
 
-import hashlib
 import logging
 import re
 import shlex
@@ -37,6 +36,7 @@ from pentaia.metasploit_wrapper import (
     build_live_console_script,
 )
 from pentaia.phase3_artifact import (
+    ARTIFACT_DIRECTORY,
     VerificationArtifact,
     artifact_content,
     artifact_path,
@@ -44,6 +44,7 @@ from pentaia.phase3_artifact import (
     artifact_verified,
     build_cleanup_command,
     build_write_command,
+    session_digest,
 )
 from pentaia.phase3_ports import (
     activate_listener_port,
@@ -125,8 +126,12 @@ def validate_session_name(value: object) -> str:
 
 
 def session_name(*, action_id: str, target: str) -> str:
-    """Build a deterministic, shell-safe tmux session name for one action."""
-    digest = hashlib.sha256(f"{action_id}:{target}".encode()).hexdigest()[:12]
+    """Build a deterministic, shell-safe tmux session name for one action.
+
+    The digest half comes from the same helper that names the marker, so the name
+    of a held console and the path of its marker can never drift apart.
+    """
+    digest = session_digest(action_id=action_id, target=target)
     label = _SAFE_SESSION_CHARS.sub("-", action_id)[:32].strip("-") or "action"
 
     return f"{SESSION_PREFIX}-{label}-{digest}"
@@ -387,17 +392,24 @@ def start_live_session(
     )
 
 
-def send_console_line(console_session: str, line: str) -> None:
-    """Type one code-owned line into a held console and press Enter."""
+def send_console_line(console_session: str, line: str) -> bool:
+    """Type one code-owned line into a held console and press Enter.
+
+    Returns False when tmux refused the keystrokes -- typically because the console
+    is gone. Callers must not report a line as delivered on the strength of an
+    ignored exit code.
+    """
     name = validate_session_name(console_session)
 
     if not isinstance(line, str) or not line.strip():
         raise ValueError("Console line must be a non-empty string.")
 
-    run_command(
+    _, _, exit_code = run_command(
         f"{TMUX_BINARY} send-keys -t {name} {shlex.quote(line.strip())} Enter",
         timeout=TMUX_TIMEOUT,
     )
+
+    return exit_code == 0
 
 
 def write_verification_artifact(
@@ -467,20 +479,31 @@ def write_verification_artifact(
 def remove_verification_artifact(
     *,
     console_session: str,
-    action_id: str,
-    target: str,
+    path: str,
 ) -> bool:
-    """Remove the marker from the target through the held session."""
-    path = artifact_path(action_id=action_id, target=target)
+    """Remove one already-located marker from the target through the held session.
 
-    send_console_line(
+    The path is passed in rather than re-derived from the action and target. That
+    matters: re-deriving it from session metadata turned a missing target into an
+    ``rm -f`` of a different, non-existent file, which reported success while the
+    real marker stayed on the target.
+    """
+    if not isinstance(path, str) or not path.startswith(f"{ARTIFACT_DIRECTORY}/"):
+        raise ValueError("Refusing to remove an artifact outside the marker directory.")
+
+    sent = send_console_line(
         console_session,
         build_cleanup_command(path=path),
     )
 
-    logger.info("Phase 3 verification artifact removal requested path=%s", path)
+    if sent:
+        logger.info("Phase 3 verification artifact removal requested path=%s", path)
+    else:
+        logger.warning(
+            "Phase 3 verification artifact removal could not be sent path=%s", path
+        )
 
-    return True
+    return sent
 
 
 def _utc_now() -> str:
@@ -554,7 +577,14 @@ def set_session_metadata(
     console_session: str,
     values: dict[str, object],
 ) -> None:
-    """Record lifecycle metadata on the tmux session itself."""
+    """Record lifecycle metadata on the tmux session itself.
+
+    A chained ``set-option`` can return success without the options becoming
+    readable, and metadata that silently did not apply is worse than none: the CLI
+    then reports the session as unknown and cleanup targets the wrong marker. So the
+    write is read back, and a chain that did not take effect is retried one option
+    at a time before the failure is reported.
+    """
     name = validate_session_name(console_session)
 
     unknown = set(values) - set(SESSION_METADATA_KEYS)
@@ -571,6 +601,24 @@ def set_session_metadata(
 
     run_command(f"{TMUX_BINARY} " + " \\; ".join(parts), timeout=TMUX_TIMEOUT)
 
+    if _metadata_round_trips(name, values):
+        return
+
+    logger.warning(
+        "Phase 3 session metadata did not apply in one tmux call session=%s; retrying per option",
+        name,
+    )
+
+    for part in parts:
+        run_command(f"{TMUX_BINARY} {part}", timeout=TMUX_TIMEOUT)
+
+    if not _metadata_round_trips(name, values):
+        logger.error(
+            "Phase 3 session metadata could not be recorded session=%s options=%s",
+            name,
+            sorted(values),
+        )
+
 
 def _metadata_format() -> str:
     """Build the tmux format string that reads the session name and our options.
@@ -586,8 +634,8 @@ def _metadata_format() -> str:
     return "|".join(keys)
 
 
-def list_held_sessions() -> list[HeldSession]:
-    """Every PentAiA console currently running on the Kali host."""
+def _metadata_rows() -> list[tuple[str, list[str]]]:
+    """Read every held session as ``(name, option values in registry order)``."""
     stdout, _, exit_code = run_command(
         f"{TMUX_BINARY} list-sessions -F {shlex.quote(_metadata_format())}",
         timeout=TMUX_TIMEOUT,
@@ -597,26 +645,52 @@ def list_held_sessions() -> list[HeldSession]:
         # No tmux server, or no sessions: both mean nothing is held.
         return []
 
-    sessions: list[HeldSession] = []
+    rows: list[tuple[str, list[str]]] = []
 
     for line in stdout.splitlines():
-        fields = line.split("|")
+        fields = [field.strip() for field in line.split("|")]
 
         if not fields or not fields[0].startswith(f"{SESSION_PREFIX}-"):
             continue
 
-        padded = fields + [""] * (len(SESSION_METADATA_KEYS) + 1 - len(fields))
+        rows.append((fields[0], fields[1:]))
+
+    return rows
+
+
+def _metadata_round_trips(name: str, values: dict[str, object]) -> bool:
+    """True when the options just written read back with the values we asked for."""
+    order = list(SESSION_METADATA_KEYS)
+    expected = {key: str(value) for key, value in values.items()}
+
+    for row_name, fields in _metadata_rows():
+        if row_name != name:
+            continue
+
+        actual = fields + [""] * (len(order) - len(fields))
+
+        return all(actual[order.index(key)] == value for key, value in expected.items())
+
+    return False
+
+
+def list_held_sessions() -> list[HeldSession]:
+    """Every PentAiA console currently running on the Kali host."""
+    sessions: list[HeldSession] = []
+
+    for name, fields in _metadata_rows():
+        padded = fields + [""] * (len(SESSION_METADATA_KEYS) - len(fields))
 
         sessions.append(
             HeldSession(
-                name=padded[0].strip(),
-                target=padded[1].strip(),
-                action_id=padded[2].strip(),
-                lport=padded[3].strip(),
-                rport=padded[4].strip(),
-                artifact_path=padded[5].strip(),
-                artifact_verified=padded[6].strip() == "1",
-                handed_off=padded[7].strip() == "1",
+                name=name,
+                target=padded[0],
+                action_id=padded[1],
+                lport=padded[2],
+                rport=padded[3],
+                artifact_path=padded[4],
+                artifact_verified=padded[5] == "1",
+                handed_off=padded[6] == "1",
             )
         )
 
@@ -676,28 +750,43 @@ def close_live_session(
     name = validate_session_name(console_session)
     held = find_held_session(name)
 
-    artifact_path = held.artifact_path if held is not None else ""
-    if not artifact_path:
-        digest = session_digest_from_name(name)
-        if digest:
-            artifact_path = artifact_path_for_digest(digest)
+    # The digest in the session name is the authoritative locator: it is derived
+    # from the action and target, so it survives metadata that is missing or
+    # unreadable. Metadata is only a fallback for a name we cannot parse.
+    artifact_path = ""
+    digest = session_digest_from_name(name)
+
+    if digest:
+        artifact_path = artifact_path_for_digest(digest)
+    elif held is not None:
+        artifact_path = held.artifact_path
 
     artifact_removed = False
     artifact_message = ""
 
-    if remove_artifact and held is not None and artifact_path:
-        remove_verification_artifact(
+    if remove_artifact and artifact_path and held is not None:
+        artifact_removed = remove_verification_artifact(
             console_session=name,
-            action_id=held.action_id,
-            target=held.target,
+            path=artifact_path,
         )
-        artifact_removed = True
-        artifact_message = f"Removal of {artifact_path} was requested on the target."
-        audit_session_event(
-            "artifact_removed",
-            session=name,
-            artifact_path=artifact_path,
-        )
+
+        if artifact_removed:
+            artifact_message = f"Removal of {artifact_path} was requested on the target."
+            audit_session_event(
+                "artifact_removed",
+                session=name,
+                artifact_path=artifact_path,
+            )
+        else:
+            artifact_message = (
+                f"The console did not accept the cleanup, so {artifact_path} may "
+                "still be on the target."
+            )
+            audit_session_event(
+                "artifact_removal_failed",
+                session=name,
+                artifact_path=artifact_path,
+            )
     elif artifact_path:
         artifact_message = (
             f"The proof marker remains on the target at {artifact_path}."

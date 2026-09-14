@@ -139,6 +139,14 @@ def _close(argv: list[str], output: Callable[[str], None]) -> int:
 
     if result.port_released:
         output("The reserved listener port was released.")
+    elif session.target and session.rport:
+        # The reservation registry lives in the agent process, so a separate CLI
+        # process has nothing to release. Killing the console is what frees the
+        # port; say that plainly instead of leaving it looking like a failure.
+        output(
+            "The listener port was freed when the console stopped; this process "
+            "held no reservation for it."
+        )
 
     return 0 if result.closed else 1
 
