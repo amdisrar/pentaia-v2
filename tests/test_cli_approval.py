@@ -8,6 +8,12 @@ from pentaia.graph import (
     rejection_node,
     route_after_agent,
     route_from_start,
+    stale_approval_node,
+)
+from pentaia.phase3_ports import (
+    activate_listener_port,
+    listener_reservation,
+    reserve_listener_port,
 )
 
 
@@ -150,6 +156,72 @@ def test_graph_rejected_state_routes_to_safe_path() -> None:
 def test_read_only_agent_output_does_not_request_approval() -> None:
     state = {"messages": [AIMessage(content="done", tool_calls=[])]}
     assert route_after_agent(state) != "approval_gate"
+
+
+def _reserve(proposal: Phase3ActionProposal) -> None:
+    reserve_listener_port(
+        action_id=proposal.action_id,
+        target=proposal.target,
+        rport=21,
+    )
+
+
+def test_rejection_releases_a_pending_reservation() -> None:
+    """A rejected proposal must not keep a port out of the approved pool."""
+    proposal = _proposal()
+    _reserve(proposal)
+
+    rejection_node({"messages": [_tool_message()]})
+
+    assert (
+        listener_reservation(
+            action_id=proposal.action_id,
+            target=proposal.target,
+            rport=21,
+        )
+        is None
+    )
+
+
+def test_rejection_leaves_an_active_reservation_alone() -> None:
+    """An active reservation backs a session that is still running on Kali.
+
+    A new proposal for the same target reuses that reservation, so abandoning the
+    new proposal must not free the port out from under the live session.
+    """
+    proposal = _proposal()
+    _reserve(proposal)
+    activate_listener_port(
+        action_id=proposal.action_id,
+        target=proposal.target,
+        rport=21,
+    )
+
+    rejection_node({"messages": [_tool_message()]})
+
+    reservation = listener_reservation(
+        action_id=proposal.action_id,
+        target=proposal.target,
+        rport=21,
+    )
+    assert reservation is not None
+    assert reservation.status == "active"
+
+
+def test_stale_approval_releases_a_pending_reservation() -> None:
+    proposal = _proposal()
+    _reserve(proposal)
+
+    stale_approval_node({"messages": [_tool_message()]})
+
+    assert (
+        listener_reservation(
+            action_id=proposal.action_id,
+            target=proposal.target,
+            rport=21,
+        )
+        is None
+    )
 
 
 def test_stale_approval_signature_changes_with_proposal() -> None:

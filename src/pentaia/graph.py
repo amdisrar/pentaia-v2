@@ -16,7 +16,7 @@ from pentaia.approval import (
 from pentaia.llm import get_llm
 from pentaia.metasploit_wrapper import prepare_metasploit_parameters
 from pentaia.phase3_candidates import candidate_context, candidates_from_messages
-from pentaia.phase3_ports import release_listener_port
+from pentaia.phase3_ports import listener_reservation, release_listener_port
 from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
@@ -181,7 +181,10 @@ def approval_gate_node(state: AgentState) -> AgentState:
 def _abandon_reservations(state: AgentState) -> None:
     """Release listener ports reserved for a proposal that is being abandoned.
 
-    A rejected or stale approval must not keep a port out of the approved pool.
+    Only a reservation that has not been activated is released. An *active*
+    reservation belongs to a session that is still running on the Kali host, and a
+    new proposal for the same target reuses that same reservation, so abandoning
+    the new proposal must not free the port out from under the live session.
     """
     for call in _state_changing_calls(state):
         args = call.get("args", {})
@@ -189,19 +192,30 @@ def _abandon_reservations(state: AgentState) -> None:
             continue
 
         try:
-            released = release_listener_port(
-                action_id=args["action_id"],
-                target=args["target"],
-                rport=args["rport"],
-            )
-        except (KeyError, ValueError):
+            action_id = args["action_id"]
+            target = args["target"]
+            rport = args["rport"]
+        except KeyError:
             continue
 
-        if released:
+        reservation = listener_reservation(
+            action_id=action_id,
+            target=target,
+            rport=rport,
+        )
+
+        if reservation is None or reservation.status != "reserved":
+            continue
+
+        if release_listener_port(
+            action_id=action_id,
+            target=target,
+            rport=rport,
+        ):
             logger.info(
                 "Phase 3 listener port released for abandoned proposal action_id=%s target=%s",
-                args.get("action_id"),
-                args.get("target"),
+                action_id,
+                target,
             )
 
 
