@@ -839,6 +839,21 @@ LIVE side effects at import time: real Gemini API calls (test_gemini.py,
 test_gemini_tools.py), an SSH session to Kali (test_kali_executor.py) and
 "nmap -sV 172.16.0.13" (test_nmap_wrapper.py). Always scope to tests/.
 
+WARNING: the agent is a long-running interactive REPL. `uv run pentaia` loads the
+whole package once at startup and keeps it for every prompt in that process, so a
+`git pull` during a session does NOT change the code the agent is executing. Only
+new processes see new code. `pentaia session <...>` is a fresh process each time,
+so the CLI and a long-lived agent can disagree about what the code does.
+
+This cost hours once, and it looked exactly like a bug: a session created by an
+agent process started before f558729 (21:13:11) had no lifecycle metadata, because
+that revision's start_live_session did not yet call set_session_metadata. The CLI
+(new process, new code) then reported the live console as "action: unknown" while
+set_session_metadata and list_held_sessions both tested fine in isolation. The
+tmux call in the agent log that looked like the metadata write was really
+wait_for_session's first capture-pane of an empty pane. ALWAYS restart the agent
+after pulling before treating live behaviour as a regression.
+
 Run linting:
 uv run ruff check .
 
