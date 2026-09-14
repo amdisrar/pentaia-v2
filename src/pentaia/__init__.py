@@ -137,6 +137,15 @@ def main() -> None:
     setup_logging()
     logger = logging.getLogger(__name__)
 
+    argv = sys.argv[1:]
+
+    if argv and argv[0] == "session":
+        # Operator-facing session management rather than an agent conversation, so
+        # it never touches the graph, the model, or any approval state.
+        from pentaia.session_cli import run_session_command
+
+        raise SystemExit(run_session_command(argv[1:]))
+
     session_id = uuid4().hex
     logger.info("PentAiA started session_id=%s", session_id)
 

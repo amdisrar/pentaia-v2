@@ -40,6 +40,7 @@ from pentaia.phase3_artifact import (
     VerificationArtifact,
     artifact_content,
     artifact_path,
+    artifact_path_for_digest,
     artifact_verified,
     build_cleanup_command,
     build_write_command,
@@ -318,6 +319,22 @@ def start_live_session(
         lport,
     )
 
+    # Metadata lives on the tmux session itself, so a later CLI process can list,
+    # show and close it without PentAiA keeping a second store that could drift.
+    set_session_metadata(
+        name,
+        {
+            "target": target,
+            "action_id": proposal.action_id,
+            "lport": lport,
+            "rport": proposal.parameters["rport"],
+            "artifact_path": "",
+            "artifact_verified": 0,
+            "handed_off": 0,
+        },
+    )
+    audit_session_event("started", session=name, target=target, lport=lport)
+
     evidence = wait_for_session(name)
     established = session_established(evidence)
 
@@ -338,6 +355,22 @@ def start_live_session(
             console_session=name,
             action_id=proposal.action_id,
             target=target,
+        )
+
+        set_session_metadata(
+            name,
+            {
+                "artifact_path": artifact.path if artifact is not None else "",
+                "artifact_verified": (
+                    1 if artifact is not None and artifact.verified else 0
+                ),
+            },
+        )
+        audit_session_event(
+            "artifact_written",
+            session=name,
+            artifact_path=artifact.path if artifact is not None else "",
+            verified=artifact is not None and artifact.verified,
         )
 
     return LiveSession(
@@ -452,3 +485,253 @@ def remove_verification_artifact(
 
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Session manager: lifecycle metadata, listing, and controlled close
+# ---------------------------------------------------------------------------
+#
+# Metadata lives on the tmux session itself as tmux user options, so it survives
+# between CLI processes without PentAiA keeping a second store that could drift
+# from reality. tmux is the source of truth for which sessions exist.
+
+SESSION_AUDIT_LOGGER_NAME = "pentaia.phase3.session"
+
+SESSION_METADATA_KEYS: dict[str, str] = {
+    "target": "@pentaia_target",
+    "action_id": "@pentaia_action",
+    "lport": "@pentaia_lport",
+    "rport": "@pentaia_rport",
+    "artifact_path": "@pentaia_artifact",
+    "artifact_verified": "@pentaia_artifact_verified",
+    "handed_off": "@pentaia_handed_off",
+}
+
+_session_audit = logging.getLogger(SESSION_AUDIT_LOGGER_NAME)
+
+
+def audit_session_event(event: str, **fields: object) -> None:
+    """Record one session lifecycle event.
+
+    Only code-owned identifiers and counts are recorded: the console pane may hold
+    raw target output, and dedicated lifecycle events must not duplicate it.
+    """
+    rendered = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
+
+    _session_audit.info("phase3 session event=%s %s", event, rendered)
+
+
+@dataclass(frozen=True)
+class HeldSession:
+    """One held console and the lifecycle state PentAiA can prove for it."""
+
+    name: str
+    target: str
+    action_id: str
+    lport: str
+    rport: str
+    artifact_path: str
+    artifact_verified: bool
+    handed_off: bool
+
+    @property
+    def lifecycle(self) -> str:
+        """The furthest state the recorded facts support, never a guess ahead."""
+        if self.handed_off:
+            return "handed_off"
+        if self.artifact_verified:
+            return "verified"
+        return "active"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["lifecycle"] = self.lifecycle
+
+        return payload
+
+
+def set_session_metadata(
+    console_session: str,
+    values: dict[str, object],
+) -> None:
+    """Record lifecycle metadata on the tmux session itself."""
+    name = validate_session_name(console_session)
+
+    unknown = set(values) - set(SESSION_METADATA_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown session metadata: {sorted(unknown)}")
+
+    parts = [
+        f"set-option -t {name} {SESSION_METADATA_KEYS[key]} {shlex.quote(str(value))}"
+        for key, value in values.items()
+    ]
+
+    if not parts:
+        return
+
+    run_command(f"{TMUX_BINARY} " + " \\; ".join(parts), timeout=TMUX_TIMEOUT)
+
+
+def _metadata_format() -> str:
+    return "|".join(["#{session_name}", *SESSION_METADATA_KEYS.values()])
+
+
+def list_held_sessions() -> list[HeldSession]:
+    """Every PentAiA console currently running on the Kali host."""
+    stdout, _, exit_code = run_command(
+        f"{TMUX_BINARY} list-sessions -F {shlex.quote(_metadata_format())}",
+        timeout=TMUX_TIMEOUT,
+    )
+
+    if exit_code != 0:
+        # No tmux server, or no sessions: both mean nothing is held.
+        return []
+
+    sessions: list[HeldSession] = []
+
+    for line in stdout.splitlines():
+        fields = line.split("|")
+
+        if not fields or not fields[0].startswith(f"{SESSION_PREFIX}-"):
+            continue
+
+        padded = fields + [""] * (len(SESSION_METADATA_KEYS) + 1 - len(fields))
+
+        sessions.append(
+            HeldSession(
+                name=padded[0].strip(),
+                target=padded[1].strip(),
+                action_id=padded[2].strip(),
+                lport=padded[3].strip(),
+                rport=padded[4].strip(),
+                artifact_path=padded[5].strip(),
+                artifact_verified=padded[6].strip() == "1",
+                handed_off=padded[7].strip() == "1",
+            )
+        )
+
+    return sessions
+
+
+def find_held_session(console_session: str) -> HeldSession | None:
+    """One held session by exact name, or None when it is not running."""
+    wanted = validate_session_name(console_session)
+
+    for session in list_held_sessions():
+        if session.name == wanted:
+            return session
+
+    return None
+
+
+def mark_session_handed_off(console_session: str) -> bool:
+    """Record that the operator has taken the session over."""
+    name = validate_session_name(console_session)
+
+    if find_held_session(name) is None:
+        raise RuntimeError(f"No PentAiA session named {name} is running on the Kali host.")
+
+    set_session_metadata(name, {"handed_off": 1})
+    audit_session_event("handed_off", session=name)
+
+    return True
+
+
+@dataclass(frozen=True)
+class SessionClose:
+    """The outcome of closing one held session."""
+
+    name: str
+    closed: bool
+    artifact_path: str
+    artifact_removed: bool
+    artifact_message: str
+    port_released: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def close_live_session(
+    console_session: str,
+    *,
+    remove_artifact: bool = True,
+) -> SessionClose:
+    """Close one held session, optionally removing its marker.
+
+    Cleanup is a code-owned operation and its result is audited. When the marker is
+    deliberately kept, or its removal cannot be confirmed, PentAiA says so plainly
+    and reports the exact path rather than implying the target was left clean.
+    """
+    name = validate_session_name(console_session)
+    held = find_held_session(name)
+
+    artifact_path = held.artifact_path if held is not None else ""
+    if not artifact_path:
+        digest = session_digest_from_name(name)
+        if digest:
+            artifact_path = artifact_path_for_digest(digest)
+
+    artifact_removed = False
+    artifact_message = ""
+
+    if remove_artifact and held is not None and artifact_path:
+        remove_verification_artifact(
+            console_session=name,
+            action_id=held.action_id,
+            target=held.target,
+        )
+        artifact_removed = True
+        artifact_message = f"Removal of {artifact_path} was requested on the target."
+        audit_session_event(
+            "artifact_removed",
+            session=name,
+            artifact_path=artifact_path,
+        )
+    elif artifact_path:
+        artifact_message = (
+            f"The proof marker remains on the target at {artifact_path}."
+        )
+        audit_session_event(
+            "artifact_retained",
+            session=name,
+            artifact_path=artifact_path,
+        )
+
+    stopped = stop_live_session(name)
+
+    port_released = False
+    if held is not None and held.action_id and held.target and held.rport:
+        port_released = release_listener_port(
+            action_id=held.action_id,
+            target=held.target,
+            rport=int(held.rport),
+        )
+
+    audit_session_event(
+        "closed",
+        session=name,
+        stopped=stopped,
+        artifact_removed=artifact_removed,
+    )
+
+    return SessionClose(
+        name=name,
+        closed=stopped,
+        artifact_path=artifact_path,
+        artifact_removed=artifact_removed,
+        artifact_message=artifact_message,
+        port_released=port_released,
+    )
+
+
+def session_digest_from_name(console_session: str) -> str | None:
+    """Recover the session digest from a PentAiA console name."""
+    name = validate_session_name(console_session)
+
+    if not name.startswith(f"{SESSION_PREFIX}-"):
+        return None
+
+    _, _, digest = name.rpartition("-")
+
+    return digest if digest else None

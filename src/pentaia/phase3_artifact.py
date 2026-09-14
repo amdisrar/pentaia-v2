@@ -62,6 +62,14 @@ def artifact_path(*, action_id: str, target: str) -> str:
     """The approved, predictable location of the marker on the target."""
     digest = session_digest(action_id=action_id, target=target)
 
+    return artifact_path_for_digest(digest)
+
+
+def artifact_path_for_digest(digest: str) -> str:
+    """The marker path for an already computed session digest."""
+    if not digest:
+        raise ValueError("A session digest is required to locate the marker.")
+
     return f"{ARTIFACT_DIRECTORY}/{ARTIFACT_PREFIX}-{digest}.txt"
 
 
