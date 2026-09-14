@@ -109,6 +109,54 @@ def test_missing_metadata_fields_do_not_break_listing(
     assert session.artifact_verified is False
 
 
+def test_listing_asks_tmux_to_expand_every_user_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare option name makes tmux echo the name instead of the value."""
+    issued = _install_fake_run_command(monkeypatch, sessions=[_row()])
+
+    list_held_sessions()
+
+    command = next(item for item in issued if item.startswith("tmux list-sessions"))
+
+    for option in phase3_session.SESSION_METADATA_KEYS.values():
+        assert f"#{{{option}}}" in command
+        assert f"|{option}|" not in command
+        assert command.endswith(f"|{option}'") is False
+
+
+def test_metadata_that_reads_back_as_an_option_name_is_not_a_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard the exact live failure: tmux returned "@pentaia_target" as a value."""
+    _install_fake_run_command(
+        monkeypatch,
+        sessions=[
+            _row(
+                target="@pentaia_target",
+                action="@pentaia_action",
+                rport="@pentaia_rport",
+            )
+        ],
+    )
+    released: list[dict] = []
+    monkeypatch.setattr(
+        phase3_session,
+        "release_listener_port",
+        lambda **kwargs: released.append(kwargs) or True,
+    )
+
+    session = list_held_sessions()[0]
+
+    assert session.target == "@pentaia_target"
+
+    # Closing must report the odd metadata rather than releasing an unrelated port.
+    result = close_live_session(NAME)
+
+    assert result.port_released is False
+    assert released == []
+
+
 @pytest.mark.parametrize(
     ("verified", "handed_off", "expected"),
     [
@@ -207,6 +255,28 @@ def test_close_reports_the_marker_path_even_when_the_session_is_gone(
     result = close_live_session(NAME)
 
     assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
+
+
+@pytest.mark.parametrize("rport", ["", "not-a-port", "21; rm -rf /"])
+def test_close_tolerates_unreadable_port_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    rport: str,
+) -> None:
+    """Metadata comes back from tmux, so a bad port must not abort the cleanup."""
+    _install_fake_run_command(monkeypatch, sessions=[_row(rport=rport)])
+    released: list[dict] = []
+    monkeypatch.setattr(
+        phase3_session,
+        "release_listener_port",
+        lambda **kwargs: released.append(kwargs) or True,
+    )
+
+    result = close_live_session(NAME)
+
+    assert result.port_released is False
+    assert released == []
+    assert result.closed is True
+    assert result.artifact_removed is True
 
 
 # --- lifecycle audit -------------------------------------------------------
@@ -410,3 +480,22 @@ def test_cli_close_keep_artifact_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_session_command(["close", NAME, "--keep-artifact"], output=captured.append) == 0
     assert seen["remove_artifact"] is False
     assert "remains on the target" in "\n".join(captured)
+
+
+def test_cli_reports_a_failure_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator command that cannot reach the host should say so, not crash."""
+
+    def explode(_output):
+        raise RuntimeError("Kali host unreachable")
+
+    monkeypatch.setattr(session_cli, "_list", explode)
+    captured: list[str] = []
+
+    assert run_session_command(["list"], output=captured.append) == 1
+
+    rendered = "\n".join(captured)
+    assert "Session command failed" in rendered
+    assert "Kali host unreachable" in rendered
+    assert "Traceback" not in rendered

@@ -158,17 +158,28 @@ def run_session_command(
     if command in {"-h", "--help", "help"}:
         output(USAGE)
         return 0
-    if command == "list":
-        return _list(output)
-    if command == "show":
-        return _show(rest, output)
-    if command == "attach":
-        return _attach(rest, output)
-    if command == "close":
-        return _close(rest, output)
 
-    output(f"Unknown session command: {command}")
-    output("")
-    output(USAGE)
+    handlers: dict[str, Callable[[], int]] = {
+        "list": lambda: _list(output),
+        "show": lambda: _show(rest, output),
+        "attach": lambda: _attach(rest, output),
+        "close": lambda: _close(rest, output),
+    }
 
-    return 2
+    handler = handlers.get(command)
+
+    if handler is None:
+        output(f"Unknown session command: {command}")
+        output("")
+        output(USAGE)
+        return 2
+
+    # Operator commands talk to the Kali host, which can fail for ordinary reasons.
+    # Report that plainly instead of dumping a traceback at the operator.
+    try:
+        return handler()
+    except Exception as exc:
+        logger.exception("Session command failed command=%s", command)
+        output(f"Session command failed: {type(exc).__name__}: {exc}")
+
+        return 1

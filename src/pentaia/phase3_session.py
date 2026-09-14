@@ -573,7 +573,17 @@ def set_session_metadata(
 
 
 def _metadata_format() -> str:
-    return "|".join(["#{session_name}", *SESSION_METADATA_KEYS.values()])
+    """Build the tmux format string that reads the session name and our options.
+
+    Every user option must be wrapped as ``#{@option}``. Passing the bare option
+    name makes tmux emit it literally, which is how the first attempt at this ended
+    up reporting the string "@pentaia_target" as a target address.
+    """
+    keys = ["#{session_name}"] + [
+        f"#{{{option}}}" for option in SESSION_METADATA_KEYS.values()
+    ]
+
+    return "|".join(keys)
 
 
 def list_held_sessions() -> list[HeldSession]:
@@ -701,12 +711,23 @@ def close_live_session(
     stopped = stop_live_session(name)
 
     port_released = False
-    if held is not None and held.action_id and held.target and held.rport:
-        port_released = release_listener_port(
-            action_id=held.action_id,
-            target=held.target,
-            rport=int(held.rport),
-        )
+
+    if held is not None and held.action_id and held.target:
+        try:
+            rport = int(held.rport)
+        except (TypeError, ValueError):
+            # Metadata is read back from the tmux server, so it can be absent or
+            # malformed. Releasing the wrong port would be worse than not releasing.
+            logger.warning(
+                "Phase 3 close skipped the port release session=%s reason=unreadable_rport",
+                name,
+            )
+        else:
+            port_released = release_listener_port(
+                action_id=held.action_id,
+                target=held.target,
+                rport=rport,
+            )
 
     audit_session_event(
         "closed",
