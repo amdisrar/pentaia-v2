@@ -35,9 +35,13 @@ from pentaia.metasploit_wrapper import (
     MetasploitOperation,
     build_live_console_script,
 )
+from pentaia.phase3_ports import (
+    activate_listener_port,
+    listener_reservation,
+    release_listener_port,
+)
 from pentaia.runtime_config import (
     get_phase3_callback_address,
-    get_phase3_listener_port,
     validate_callback_ipv4,
     validate_listener_port,
 )
@@ -244,9 +248,17 @@ def start_live_session(
             "Runtime callback configuration changed after approval; approval is stale."
         )
 
-    if lport != get_phase3_listener_port():
+    # The listener port is authoritative through its reservation: a released or
+    # expired reservation means the approved port is no longer held for us.
+    reservation = listener_reservation(
+        action_id=proposal.action_id,
+        target=target,
+        rport=proposal.parameters["rport"],
+    )
+
+    if reservation is None or reservation.lport != lport:
         raise ValueError(
-            "Runtime listener configuration changed after approval; approval is stale."
+            "The approved listener port reservation is no longer valid; approval is stale."
         )
 
     name = session_name(action_id=proposal.action_id, target=target)
@@ -270,7 +282,19 @@ def start_live_session(
     )
 
     if exit_code != 0 or not live_session_running(name):
+        release_listener_port(
+            action_id=proposal.action_id,
+            target=target,
+            rport=proposal.parameters["rport"],
+        )
         raise RuntimeError("Unable to start the PentAiA session on the Kali host.")
+
+    activate_listener_port(
+        action_id=proposal.action_id,
+        target=target,
+        rport=proposal.parameters["rport"],
+        proposal_signature=proposal.signature(),
+    )
 
     logger.info(
         "Phase 3 held session started session=%s target=%s lport=%s",
@@ -285,6 +309,11 @@ def start_live_session(
     if not established:
         # Never leave a console holding the listener port on a failed attempt.
         stop_live_session(name)
+        release_listener_port(
+            action_id=proposal.action_id,
+            target=target,
+            rport=proposal.parameters["rport"],
+        )
 
     return LiveSession(
         action_id=proposal.action_id,

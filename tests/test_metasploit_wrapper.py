@@ -6,12 +6,21 @@ from pentaia.approval import (
     create_pending_approval,
 )
 from pentaia import metasploit_wrapper
+from pentaia.phase3_ports import (
+    release_listener_port,
+    reset_listener_port_reservations,
+)
 
 
 @pytest.fixture(autouse=True)
 def fixed_listener_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the runtime-owned listener port deterministic across the suite."""
     monkeypatch.setenv("PENTAIA_LPORT", "4444")
+    monkeypatch.delenv("PENTAIA_LPORT_MIN", raising=False)
+    monkeypatch.delenv("PENTAIA_LPORT_MAX", raising=False)
+    reset_listener_port_reservations()
+    yield
+    reset_listener_port_reservations()
 
 
 def _proposal(
@@ -20,16 +29,25 @@ def _proposal(
     action_id: str = "validate_vsftpd_234_backdoor",
     parameters: dict | None = None,
 ) -> Phase3ActionProposal:
+    if parameters is not None:
+        resolved = parameters
+    elif action_id in metasploit_wrapper.PREDEFINED_METASPLOIT_OPERATIONS:
+        # Build real runtime-owned values, which also establishes the listener
+        # port reservation the execution path now requires.
+        resolved = metasploit_wrapper.prepare_metasploit_parameters(
+            action_id,
+            {"rport": 21},
+            target=target,
+        )
+    else:
+        resolved = {"rport": 21, "lhost": "172.16.0.13", "lport": 4444}
+
     return Phase3ActionProposal(
         action_id=action_id,
         target=target,
         rationale="Validate a confirmed Phase 2 finding in the authorized lab.",
         expected_effect="Run the predefined controlled validation action.",
-        parameters=(
-            parameters
-            if parameters is not None
-            else {"rport": 21, "lhost": "172.16.0.13", "lport": 4444}
-        ),
+        parameters=resolved,
     )
 
 
@@ -49,6 +67,7 @@ def test_prepare_parameters_resolves_runtime_callback_before_approval(
     parameters = metasploit_wrapper.prepare_metasploit_parameters(
         "validate_vsftpd_234_backdoor",
         {"rport": 21},
+        target="172.16.0.64",
     )
 
     assert parameters == {"rport": 21, "lhost": "172.16.0.13", "lport": 4444}
@@ -447,6 +466,7 @@ def test_prepare_parameters_includes_runtime_listener_port(
     parameters = metasploit_wrapper.prepare_metasploit_parameters(
         "validate_vsftpd_234_backdoor",
         {"rport": 21},
+        target="172.16.0.64",
     )
 
     assert parameters == {"rport": 21, "lhost": "172.16.0.13", "lport": 5555}
@@ -461,38 +481,52 @@ def test_model_supplied_listener_port_cannot_override_runtime_value(
     parameters = metasploit_wrapper.prepare_metasploit_parameters(
         "validate_vsftpd_234_backdoor",
         {"rport": 21, "lport": 9999},
+        target="172.16.0.64",
     )
 
     # The runtime value always wins: the model cannot choose where PentAiA listens.
     assert parameters["lport"] == 5555
 
 
-def test_listener_port_is_covered_by_the_proposal_signature(
+def test_listener_port_is_covered_by_the_proposal_signature() -> None:
+    """The reserved port is part of the exact proposal a human approves."""
+    first = _proposal(
+        parameters={"rport": 21, "lhost": "172.16.0.13", "lport": 5000}
+    )
+    second = _proposal(
+        parameters={"rport": 21, "lhost": "172.16.0.13", "lport": 5001}
+    )
+
+    assert first.signature() != second.signature()
+
+
+def test_reserving_the_same_proposal_twice_returns_the_same_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Rebuilds must not move the port, or every approval would look stale."""
     monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
-
     monkeypatch.setenv("PENTAIA_LPORT", "4444")
+
     first = metasploit_wrapper.prepare_metasploit_parameters(
-        "validate_vsftpd_234_backdoor", {"rport": 21}
+        "validate_vsftpd_234_backdoor", {"rport": 21}, target="172.16.0.64"
     )
-
-    monkeypatch.setenv("PENTAIA_LPORT", "5555")
     second = metasploit_wrapper.prepare_metasploit_parameters(
-        "validate_vsftpd_234_backdoor", {"rport": 21}
+        "validate_vsftpd_234_backdoor", {"rport": 21}, target="172.16.0.64"
     )
 
-    first_proposal = _proposal(parameters=first)
-    second_proposal = _proposal(parameters=second)
+    assert first == second
+    assert _proposal(parameters=first).signature() == _proposal(
+        parameters=second
+    ).signature()
 
-    assert first_proposal.signature() != second_proposal.signature()
 
-
-def test_runtime_listener_change_after_approval_blocks_before_execution(
+def test_released_reservation_invalidates_the_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A released reservation means the approved port is no longer held for us."""
     monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
     monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
+    monkeypatch.setenv("PENTAIA_LPORT", "4444")
 
     called = False
 
@@ -506,9 +540,13 @@ def test_runtime_listener_change_after_approval_blocks_before_execution(
     proposal = _proposal()
     approval = _approved(proposal)
 
-    monkeypatch.setenv("PENTAIA_LPORT", "5555")
+    release_listener_port(
+        action_id=proposal.action_id,
+        target=proposal.target,
+        rport=21,
+    )
 
-    with pytest.raises(ValueError, match="listener configuration changed"):
+    with pytest.raises(ValueError, match="reservation is no longer valid"):
         metasploit_wrapper.run_metasploit_action(proposal, approval)
 
     assert called is False

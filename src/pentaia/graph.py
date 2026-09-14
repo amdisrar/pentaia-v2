@@ -16,6 +16,7 @@ from pentaia.approval import (
 from pentaia.llm import get_llm
 from pentaia.metasploit_wrapper import prepare_metasploit_parameters
 from pentaia.phase3_candidates import candidate_context, candidates_from_messages
+from pentaia.phase3_ports import release_listener_port
 from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
@@ -147,6 +148,7 @@ def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal:
     parameters = prepare_metasploit_parameters(
         action_id,
         {"rport": args["rport"]},
+        target=args["target"],
     )
     return Phase3ActionProposal(
         action_id=action_id,
@@ -176,10 +178,39 @@ def approval_gate_node(state: AgentState) -> AgentState:
     return {"pending_approval": create_pending_approval(proposal)}
 
 
+def _abandon_reservations(state: AgentState) -> None:
+    """Release listener ports reserved for a proposal that is being abandoned.
+
+    A rejected or stale approval must not keep a port out of the approved pool.
+    """
+    for call in _state_changing_calls(state):
+        args = call.get("args", {})
+        if not isinstance(args, dict):
+            continue
+
+        try:
+            released = release_listener_port(
+                action_id=args["action_id"],
+                target=args["target"],
+                rport=args["rport"],
+            )
+        except (KeyError, ValueError):
+            continue
+
+        if released:
+            logger.info(
+                "Phase 3 listener port released for abandoned proposal action_id=%s target=%s",
+                args.get("action_id"),
+                args.get("target"),
+            )
+
+
 def rejection_node(state: AgentState) -> AgentState:
     message = _last_ai_message(state)
     if message is None or not message.tool_calls:
         return {"messages": [], "pending_approval": None}
+
+    _abandon_reservations(state)
 
     tool_messages = []
     for call in message.tool_calls:
@@ -206,6 +237,8 @@ def stale_approval_node(state: AgentState) -> AgentState:
     message = _last_ai_message(state)
     if message is None or not message.tool_calls:
         return {"messages": [], "pending_approval": None}
+
+    _abandon_reservations(state)
 
     tool_messages = [
         ToolMessage(

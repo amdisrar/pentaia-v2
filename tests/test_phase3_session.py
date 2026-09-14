@@ -9,6 +9,11 @@ from pentaia.approval import (
 from pentaia.metasploit_wrapper import (
     PREDEFINED_METASPLOIT_OPERATIONS,
     MetasploitOperation,
+    prepare_metasploit_parameters,
+)
+from pentaia.phase3_ports import (
+    release_listener_port,
+    reset_listener_port_reservations,
 )
 from pentaia.phase3_session import (
     SESSION_PREFIX,
@@ -34,17 +39,33 @@ PANE_WITHOUT_SESSION = "[*] Started reverse TCP handler on 172.16.0.13:4444\n"
 def _configure_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PENTAIA_LHOST", "172.16.0.13")
     monkeypatch.setenv("PENTAIA_LPORT", "4444")
+    monkeypatch.delenv("PENTAIA_LPORT_MIN", raising=False)
+    monkeypatch.delenv("PENTAIA_LPORT_MAX", raising=False)
     monkeypatch.setenv("PENTAIA_PHASE3_ALLOWLIST", "172.16.0.64")
     monkeypatch.delenv("PENTAIA_PHASE3_DENYLIST", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolated_listener_ports():
+    reset_listener_port_reservations()
+    yield
+    reset_listener_port_reservations()
+
+
 def _proposal() -> Phase3ActionProposal:
+    # Build real runtime-owned values, which also establishes the listener port
+    # reservation the console path now requires.
+    parameters = prepare_metasploit_parameters(
+        "validate_vsftpd_234_backdoor",
+        {"rport": 21},
+        target="172.16.0.64",
+    )
     return Phase3ActionProposal(
         action_id="validate_vsftpd_234_backdoor",
         target="172.16.0.64",
         rationale="normalized source evidence",
         expected_effect="controlled validation",
-        parameters={"rport": 21, "lhost": "172.16.0.13", "lport": 4444},
+        parameters=parameters,
     )
 
 
@@ -369,17 +390,23 @@ def test_start_live_session_rejects_unauthorized_target(
     assert not any(command.startswith("tmux new-session") for command in issued)
 
 
-def test_stale_listener_port_blocks_before_the_console_starts(
+def test_released_reservation_blocks_before_the_console_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A released reservation means the approved port is no longer held for us."""
     _configure_env(monkeypatch)
     issued, _ = _install_fake_run_command(monkeypatch)
 
     proposal = _proposal()
     approval = _approved(proposal)
-    monkeypatch.setenv("PENTAIA_LPORT", "5555")
 
-    with pytest.raises(ValueError, match="listener configuration changed"):
+    release_listener_port(
+        action_id=proposal.action_id,
+        target=proposal.target,
+        rport=21,
+    )
+
+    with pytest.raises(ValueError, match="reservation is no longer valid"):
         start_live_session(proposal, approval)
 
     assert not any(command.startswith("tmux new-session") for command in issued)
@@ -407,6 +434,11 @@ def test_action_without_a_reverse_session_is_rejected(
     _configure_env(monkeypatch)
     _install_fake_run_command(monkeypatch)
 
+    # Build the approved proposal while the real operation is still registered,
+    # then strip the reverse-session capability the console path requires.
+    proposal = _proposal()
+    approval = _approved(proposal)
+
     original = PREDEFINED_METASPLOIT_OPERATIONS["validate_vsftpd_234_backdoor"]
     monkeypatch.setitem(
         PREDEFINED_METASPLOIT_OPERATIONS,
@@ -418,10 +450,8 @@ def test_action_without_a_reverse_session_is_rejected(
         ),
     )
 
-    proposal = _proposal()
-
     with pytest.raises(ValueError, match="does not establish a reverse session"):
-        start_live_session(proposal, _approved(proposal))
+        start_live_session(proposal, approval)
 
 
 def test_unknown_action_id_is_rejected(

@@ -122,6 +122,7 @@ def _run_phase3_validation_tool(
         parameters = prepare_metasploit_parameters(
             action_id,
             {"rport": rport},
+            target=target,
         )
         proposal = Phase3ActionProposal(
             action_id=action_id,

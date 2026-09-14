@@ -10,9 +10,9 @@ from pentaia.approval import (
 )
 from pentaia.authorization import authorize_phase3_target
 from pentaia.kali_executor import run_command
+from pentaia.phase3_ports import listener_reservation, reserve_listener_port
 from pentaia.runtime_config import (
     get_phase3_callback_address,
-    get_phase3_listener_port,
     validate_callback_ipv4,
     validate_listener_port,
 )
@@ -91,12 +91,18 @@ PREDEFINED_METASPLOIT_OPERATIONS: dict[str, MetasploitOperation] = {
 def prepare_metasploit_parameters(
     action_id: str,
     model_parameters: dict[str, Any],
+    *,
+    target: str | None = None,
 ) -> dict[str, Any]:
     """Resolve runtime-owned material parameters before human approval.
 
     Model-controlled values are copied first. Runtime-owned values required by the
-    code-owned operation are then resolved from PentAiA configuration and validated.
+    code-owned operation are then resolved and validated: the callback address from
+    deployment configuration, and a listener port reserved from the approved pool.
     The returned dictionary is suitable for inclusion in the exact signed proposal.
+
+    ``target`` is required for operations that establish a reverse session, because
+    the listener reservation is keyed on the pending proposal's identity.
     """
     operation = PREDEFINED_METASPLOIT_OPERATIONS.get(action_id)
     if operation is None:
@@ -107,11 +113,37 @@ def prepare_metasploit_parameters(
         parameters["lhost"] = get_phase3_callback_address()
 
     if operation.establishes_reverse_session:
-        # PentAiA owns the listener port. It is resolved here so the exact value
-        # is covered by the signed proposal before any human approves it.
-        parameters["lport"] = get_phase3_listener_port()
+        if not target:
+            raise ValueError(
+                "A target is required to reserve a listener port for this action."
+            )
+
+        # Validate the remote port before reserving so an invalid request never
+        # takes one. The reservation is keyed on the proposal identity before the
+        # port is added, so rebuilding this same proposal reuses the same port and
+        # the signature stays stable across the approval decision.
+        parameters["rport"] = _validate_rport(parameters.get("rport", 21))
+        parameters["lport"] = reserve_listener_port(
+            action_id=action_id,
+            target=target,
+            rport=parameters["rport"],
+        )
 
     return _validate_parameters(action_id, parameters)
+
+
+def _is_port_number(value: object) -> bool:
+    """True only for a genuine integer port, never a bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_rport(value: object) -> int:
+    if not _is_port_number(value):
+        raise ValueError("Metasploit rport must be an integer.")
+    if not 1 <= value <= 65535:
+        raise ValueError("Metasploit rport must be between 1 and 65535.")
+
+    return value
 
 
 def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -123,11 +155,7 @@ def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str
                 + ", ".join(sorted(unexpected))
             )
 
-        rport = parameters.get("rport", 21)
-        if isinstance(rport, bool) or not isinstance(rport, int):
-            raise ValueError("Metasploit rport must be an integer.")
-        if not 1 <= rport <= 65535:
-            raise ValueError("Metasploit rport must be between 1 and 65535.")
+        rport = _validate_rport(parameters.get("rport", 21))
 
         lhost = validate_callback_ipv4(parameters.get("lhost"))
         lport = validate_listener_port(parameters.get("lport"))
@@ -139,9 +167,15 @@ def _validate_parameters(action_id: str, parameters: dict[str, Any]) -> dict[str
 
 def _require_current_runtime_parameters(
     operation: MetasploitOperation,
+    target: str,
     parameters: dict[str, Any],
 ) -> None:
-    """Ensure approval-bound runtime values still match current configuration."""
+    """Ensure approval-bound runtime values are still the ones that were approved.
+
+    The listener port is authoritative through its reservation: if the reservation
+    expired or was released, the port the human approved is no longer held for us,
+    so the approval is stale even though the proposal is unchanged.
+    """
     if not operation.requires_callback_address:
         return
 
@@ -152,10 +186,15 @@ def _require_current_runtime_parameters(
         )
 
     if operation.establishes_reverse_session:
-        current_lport = get_phase3_listener_port()
-        if parameters.get("lport") != current_lport:
+        reservation = listener_reservation(
+            action_id=operation.action_id,
+            target=target,
+            rport=parameters["rport"],
+        )
+
+        if reservation is None or reservation.lport != parameters.get("lport"):
             raise ValueError(
-                "Runtime listener configuration changed after approval; approval is stale."
+                "The approved listener port reservation is no longer valid; approval is stale."
             )
 
 
@@ -266,7 +305,7 @@ def run_metasploit_action(
     # Runtime-owned material values are resolved before approval, included in the
     # proposal signature, and checked again immediately before execution. A changed,
     # missing, or invalid runtime value makes the prior approval unusable.
-    _require_current_runtime_parameters(operation, parameters)
+    _require_current_runtime_parameters(operation, target, parameters)
 
     command = _build_command(operation, target, parameters)
 

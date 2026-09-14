@@ -163,7 +163,7 @@ def test_non_reverse_action_still_uses_the_bounded_run(
     # does not establish a reverse session.
     monkeypatch.setattr(
         "pentaia.phase3_tools.prepare_metasploit_parameters",
-        lambda action_id, parameters: {
+        lambda action_id, parameters, **kwargs: {
             "rport": 21,
             "lhost": "172.16.0.13",
             "lport": 4444,
