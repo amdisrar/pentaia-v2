@@ -4,6 +4,7 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
+from pentaia.discovery_profiles import NMAP_DEFAULT_PROFILE, NmapProfileName
 from pentaia.findings import findings_to_json, parse_nuclei_jsonl
 from pentaia.logging_config import setup_logging
 from pentaia.nmap_wrapper import nmap_scan
@@ -26,26 +27,53 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 @tool
-def nmap_service_scan(target: str) -> str:
-    """Run an authorized Nmap service/version scan against one IPv4 lab target.
+def nmap_service_scan(
+    target: str,
+    profile: NmapProfileName = NMAP_DEFAULT_PROFILE,
+    ports: list[int] | None = None,
+) -> str:
+    """Run an authorized Nmap scan against one IPv4 lab target.
 
     Use this tool only for authorized lab systems.
-    The input must be a single IPv4 address.
+    The target must be a single IPv4 address.
+
+    ``profile`` selects one code-owned scan profile:
+    - "service": service and version identification of common ports (default)
+    - "quick": faster scan limited to the most common TCP ports
+    - "full_tcp": every TCP port
+    - "os": operating-system identification, which needs raw-socket privileges
+      on the Kali host and fails cleanly if the execution account lacks them
+
+    ``ports`` optionally bounds the scan to specific TCP ports. Only the profiles
+    that accept a port selection honour it, and at most 64 ports may be named.
+
+    PentAiA validates both values and builds the native command itself, so no
+    command-line options are accepted from you.
     """
     started_at = perf_counter()
-    logger.info("Tool selected: nmap_service_scan target=%s", target)
+    logger.info(
+        "Tool selected: nmap_service_scan target=%s profile=%s ports=%s",
+        target,
+        profile,
+        ports,
+    )
 
     try:
-        stdout, stderr, exit_code = nmap_scan(target)
+        stdout, stderr, exit_code = nmap_scan(
+            target,
+            profile=profile,
+            ports=ports,
+        )
 
     except ValueError as exc:
         logger.warning(
-            "Nmap validation failed target=%s elapsed_ms=%s error=%s",
+            "Nmap validation failed target=%s profile=%s elapsed_ms=%s error=%s",
             target,
+            profile,
             _elapsed_ms(started_at),
             exc,
         )
-        return f"Target validation failed: {exc}"
+        return f"Target or scan-option validation failed: {exc}"
 
     except RuntimeError as exc:
         logger.error(
