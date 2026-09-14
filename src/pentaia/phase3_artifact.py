@@ -22,6 +22,15 @@ ARTIFACT_DIRECTORY = "/tmp"
 ARTIFACT_PREFIX = "pentaia-poc"
 ARTIFACT_SUCCESS_MARKER = "PENTAIA: POC SUCCESSFUL"
 
+# Metasploit's "sessions -c" runs a shell command on a session, while "-C" runs a
+# *Meterpreter* command. Every predefined action here yields a command shell, and
+# "-C" skips those outright with:
+#   [-] Session #N is not a Meterpreter shell. Skipping...
+# so verification could never succeed. With no "-i" the command runs on every
+# session in the console, which is exactly one by construction: the console is
+# created per action and target, and a second one for the same pair is refused.
+CONSOLE_RUN_FLAG = "-c"
+
 # Characters that would break out of the double-quoted msfconsole argument.
 _UNSAFE_INNER_CHARS = ('"', "$", "`", "\\")
 
@@ -98,14 +107,14 @@ def build_write_command(*, path: str, content: str) -> str:
     parts += [f"echo {shlex.quote(line)} >> {quoted_path}" for line in lines[1:]]
     parts.append(f"cat {quoted_path}")
 
-    return f'sessions -C "{_require_console_safe(" && ".join(parts))}"'
+    return f'sessions {CONSOLE_RUN_FLAG} "{_require_console_safe(" && ".join(parts))}"'
 
 
 def build_cleanup_command(*, path: str) -> str:
     """Build the console line that removes the marker."""
     inner = f"rm -f {shlex.quote(path)}"
 
-    return f'sessions -C "{_require_console_safe(inner)}"'
+    return f'sessions {CONSOLE_RUN_FLAG} "{_require_console_safe(inner)}"'
 
 
 def artifact_verified(*, pane_text: object, content: str) -> bool:

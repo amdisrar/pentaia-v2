@@ -83,7 +83,7 @@ def test_write_command_writes_then_reads_back() -> None:
     path = artifact_path(action_id=ACTION, target=TARGET)
     command = build_write_command(path=path, content=_content())
 
-    assert command.startswith("sessions -C \"")
+    assert command.startswith("sessions -c \"")
     assert command.endswith("\"")
     assert "echo" in command
     assert "cat" in command
@@ -108,11 +108,26 @@ def test_write_command_never_contains_the_contiguous_marker() -> None:
     assert "\n".join(content.splitlines()[:2]) not in command
 
 
+def test_the_shell_flag_is_used_not_the_meterpreter_flag() -> None:
+    """-C is Meterpreter-only and skips a command shell outright.
+
+    Observed live: `sessions -C "..."` answered
+    "[-] Session #1 is not a Meterpreter shell. Skipping..." and wrote nothing.
+    """
+    from pentaia.phase3_artifact import CONSOLE_RUN_FLAG
+
+    command = build_write_command(path="/tmp/x", content=_content())
+
+    assert CONSOLE_RUN_FLAG == "-c"
+    assert command.startswith("sessions -c ")
+    assert "sessions -C " not in command
+
+
 def test_cleanup_command_removes_only_the_marker() -> None:
     path = artifact_path(action_id=ACTION, target=TARGET)
     command = build_cleanup_command(path=path)
 
-    assert command == f'sessions -C "rm -f {path}"'
+    assert command == f'sessions -c "rm -f {path}"'
 
 
 def test_commands_reject_content_that_would_break_the_console_argument() -> None:
