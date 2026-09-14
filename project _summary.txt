@@ -389,48 +389,82 @@ LAB-SPECIFIC FACTS DISCOVERED BY TESTING — do not re-derive these blind:
 10. CURRENT PHASE 3 STATE
 ======================================================================
 
-Phase 3 is functional and, as of 2026-09-11, VERIFIED end to end against the
-authorized lab. The remaining work is completeness rather than proof of concept.
+Phase 3 is COMPLETE and VERIFIED end to end in the authorized lab. Last live run
+2026-09-14. P3-11, P3-14 and P3-15 were closed on the strength of it.
 
-Already implemented:
-- target allowlist/denylist policy
-- protected-target handling
-- signed exact action proposals
-- human approval primitives
-- CLI approval pause/resume implementation
-- controlled predefined validation wrapper
-- deterministic finding-to-validation mapping
-- constrained LangChain Phase 3 tool
-- normalized Phase 3 results
-- conservative Gemini interpretation rules
-- Phase 3 audit module
-- same-process conversation/checkpoint persistence
-- runtime callback-address and listener-port validation
-- VERIFIED exploitation producing a reverse shell back to Kali
-- held validation session with explicit human handoff (tmux console)
+VERIFIED LIVE RUN (2026-09-14):
+- discovery: Nmap service scan found 21/tcp vsftpd 2.3.4; Nuclei reported the
+  CVE-2011-2523 backdoor for the same host
+- candidate lookup matched exactly one supported action:
+  validate_vsftpd_234_backdoor (target 172.16.0.64, rport 21)
+- proposal signature dd423f92f2e6dd6879991039c5d079817ad1c5da7ccd1b77ca3fade1abad3ab1
+  with runtime-owned parameters {lhost 172.16.0.13, lport 5000, rport 21}
+- audit: phase3 event=approval decision=approved and phase3 event=proposal sharing
+  that signature, finding_reference_id=8ce1354514e695df
+- execution: exploit/unix/ftp/vsftpd_234_backdoor on Kali produced
+  "[*] Command shell session 1 opened (172.16.0.13:5000 -> 172.16.0.64)"
+- session: phase3 session event=started
+  session=pentaia-phase3-validate_vsftpd_234_backdoor-66d6db4c2ad8
+  target=172.16.0.64 lport=5000 (lifecycle metadata written AND read back)
+- marker: /tmp/pentaia-poc-66d6db4c2ad8.txt written and verified on the target,
+  content "PENTAIA: POC SUCCESSFUL ... Timestamp: 2026-09-14T18:03:04Z"
+- audit: phase3 event=result ... outcome=success evidence_chars=622
+- operator took the console over with tmux attach, ran `sessions -i 1`, listed /
+  through the backdoor shell and read the mode-0600 root-owned marker back
+- close: phase3 session event=artifact_retained then event=closed; marker retained
 
-Remaining Phase 3 work is mainly:
-- close out P3-09 (effectively satisfied: the suite is green and the results were
-  recorded on the issue) and finish P3-10 (its manual CLI REJECT path has still
-  not been exercised; the approve path has)
-- automatically connect discovery findings to the Test Framework candidate lookup
-  in normal orchestration (P3-13). This is the reason the operator currently has
-  to name the action id in the prompt; validation_mapping.py exists and is tested
-  but nothing calls it in production.
-- complete the reusable typed profile/parameter ownership architecture and
-  listener-port POOL management (P3-14). Only the single runtime-owned listener
-  port is done.
-- complete the validation-session lifecycle (P3-15): the code-owned proof
-  artifact on the target, the pentaia session list/show/attach/close UX,
-  expiry/cleanup policy, lifecycle states and lifecycle audit events.
-- then run/update the final consolidated end-to-end Phase 3 acceptance workflow
-  (P3-11), which should be re-scoped to cover P3-13/P3-14/P3-15.
+DO NOT overclaim root from the audit record. outcome=success is satisfied by ANY of
+SUCCESS_EVIDENCE_MARKERS = "uid=0(root)" | "meterpreter session" | "command shell
+session" (src/pentaia/phase3_results.py:48). This run matched "command shell
+session". Root is proven by target-side evidence: a mode-0600 root-owned marker that
+the shell wrote and read. Run `id` on a future run if the canonical marker is wanted.
+
+Implemented, and the basis for closing P3-11/P3-14/P3-15:
+- target allowlist/denylist policy and protected-target handling
+- signed exact action proposals bound to the human approval
+- CLI approval pause/approve, re-prompting on unexpected input (never approves)
+- controlled predefined validation wrapper, bounded and non-interactive
+- deterministic finding-to-validation mapping wired into orchestration (delivered)
+- constrained LangChain Phase 3 tool whose MODEL-VISIBLE schema
+  (tool_call_schema) equals PHASE3_TOOL_ARGUMENTS exactly: five required args, the
+  injected approval hidden. Note args_schema DOES list approval; tool_call_schema
+  is the one the model is bound to. Assert the latter.
+- normalized Phase 3 results and conservative interpretation rules
+- Phase 3 audit module; same-process conversation/checkpoint persistence
+- runtime callback-address validation and a listener-port POOL (min/max, TTL,
+  reserved->active->released/expired) keyed on (action, target, rport)
+- typed discovery scan profiles with explicit model/runtime/code ownership
+- held validation session in a detached tmux console with lifecycle metadata,
+  human handoff, and `pentaia session list|show|attach|close`
+- code-owned proof marker verified by reading it back off the console
+
+DELIBERATE SCOPE CHANGE — the marker is never deleted. Cleanup was removed on the
+operator's instruction (commit 2df0e87). Retention is now the defined behaviour:
+`close` stops the console and reports where the marker was left. See invariant 19.
+
+Known cosmetic gap: `pentaia session close` cannot release a listener-port
+reservation, because the reservation registry is process-local while the CLI is a
+separate process. Killing the console is what frees the port, and the CLI says so.
 
 ======================================================================
 11. ALL CURRENTLY OPEN GITHUB ISSUES
 ======================================================================
 
-At this snapshot there are 34 open issues.
+At this snapshot there are 30 open issues (45 closed).
+
+UPDATE 2026-09-14 — closed after the verified live run in section 10:
+- #43 P3-11 end-to-end human-approved Phase 3 validation — verified live.
+- #71 P3-14 typed parameter/scan-profile architecture + listener-port pool — delivered.
+- #72 P3-15 session lifecycle, verification artifact, human handoff — delivered.
+
+UPDATE 2026-09-14 — #15 P1-15 documentation: README.md was rewritten (architecture,
+phase status, safety model, verified Phase 3 flow, module/tests layout, configuration
+table, running and session CLI, testing). Left OPEN deliberately; close it if the
+README is judged sufficient, otherwise scope the remainder to historical Phase 1 notes.
+
+The per-issue notes below predate 2026-09-14 and several are stale (they still
+describe P3-09/P3-10 as open, and P3-13/P3-14/P3-15 as pending). Treat this block as
+authoritative.
 
 ---------------------------------------------------------------------
 A. DOCUMENTATION / HOUSEKEEPING
