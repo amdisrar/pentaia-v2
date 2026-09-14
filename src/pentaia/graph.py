@@ -148,6 +148,55 @@ def _state_changing_calls(state: AgentState) -> list[dict]:
     ]
 
 
+def _argument_problem(args: dict) -> tuple[list[str], list[str]]:
+    """Split a tool call's raw arguments into (missing, unexpected) names."""
+    supplied = set(args)
+
+    return (
+        sorted(PHASE3_TOOL_ARGUMENTS - supplied),
+        sorted(supplied - PHASE3_TOOL_ARGUMENTS),
+    )
+
+
+def _invalid_proposal_text(call: dict) -> str:
+    """Explain exactly what was wrong with a refused proposal.
+
+    The agent has to be able to correct itself, so name the fields that were missing
+    or not accepted. Reporting every refusal as "incomplete or invalid" left the
+    model retrying the same call, and reporting a missing field as an *unexpected*
+    one made a live rejection look impossible to explain.
+    """
+    args = call.get("args")
+
+    if not isinstance(args, dict):
+        return (
+            "The proposed action did not arrive as a set of arguments, so PentAiA "
+            "will not ask for approval. Nothing was executed."
+        )
+
+    missing, unexpected = _argument_problem(args)
+    problems = []
+
+    if missing:
+        problems.append("missing: " + ", ".join(missing))
+    if unexpected:
+        problems.append("not accepted: " + ", ".join(unexpected))
+    if not problems:
+        # Every expected argument is present, so the values themselves were refused
+        # by the action registry or the runtime parameter validation.
+        problems.append(
+            "the action id or remote port is not one PentAiA can run for this target"
+        )
+
+    return (
+        "PentAiA refused the proposal because its arguments were wrong ("
+        + "; ".join(problems)
+        + "). Call the tool again with exactly these arguments: "
+        + ", ".join(sorted(PHASE3_TOOL_ARGUMENTS))
+        + ". Nothing was executed."
+    )
+
+
 def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal | None:
     """Build the exact proposal, or None when the tool call is not usable.
 
@@ -162,11 +211,17 @@ def _proposal_from_tool_call(call: dict) -> Phase3ActionProposal | None:
 
     # The model may supply only the typed, known arguments. Anything else is
     # refused rather than silently dropped, so an unexpected field can never be
-    # mistaken for something PentAiA honoured.
-    if set(args) != PHASE3_TOOL_ARGUMENTS:
+    # mistaken for something PentAiA honoured. A missing field is refused too, and
+    # the two are logged separately: an empty "unexpected" list alongside a refusal
+    # means the call was incomplete, and saying otherwise sends the reader looking
+    # for an extra argument that is not there.
+    missing, unexpected = _argument_problem(args)
+
+    if missing or unexpected:
         logger.warning(
-            "Phase 3 proposal rejected reason=unexpected_args unexpected=%s",
-            sorted(set(args) - PHASE3_TOOL_ARGUMENTS),
+            "Phase 3 proposal rejected reason=invalid_args missing=%s unexpected=%s",
+            missing,
+            unexpected,
         )
         return None
 
@@ -255,11 +310,7 @@ def approval_gate_node(state: AgentState) -> AgentState:
             "messages": _blocked_tool_messages(
                 message,
                 reason="invalid_proposal",
-                text=(
-                    "The proposed action was incomplete or invalid, so PentAiA will "
-                    "not ask for approval. Provide the action id, target, rationale, "
-                    "expected effect and remote port. Nothing was executed."
-                ),
+                text=_invalid_proposal_text(calls[0]),
             ),
             "pending_approval": None,
         }

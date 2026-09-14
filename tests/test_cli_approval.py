@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage
 from pentaia.approval import Phase3ActionProposal, create_pending_approval
 from pentaia.cli_approval import resolve_cli_approval
 from pentaia.graph import (
+    PHASE3_TOOL_ARGUMENTS,
     approval_gate_node,
     rejection_node,
     route_after_agent,
@@ -340,6 +341,74 @@ def test_gate_blocks_an_incomplete_proposal_instead_of_crashing() -> None:
 
     assert result["pending_approval"] is None
     assert "invalid_proposal" in result["messages"][0].content
+
+
+def test_a_refusal_names_the_argument_that_is_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The agent can only correct itself if the refusal says what was wrong.
+
+    A live rejection logged `reason=unexpected_args unexpected=[]`, which reads as
+    "no argument was unexpected" and sent the reader hunting for an extra argument
+    that was never there. The call was simply incomplete.
+    """
+    args = _full_args()
+    args.pop("rport")
+
+    with caplog.at_level("WARNING", logger="pentaia.graph"):
+        result = approval_gate_node({"messages": [_ai_message_with(args)]})
+
+    assert any(
+        "missing=['rport'] unexpected=[]" in record.getMessage()
+        for record in caplog.records
+    )
+
+    text = result["messages"][0].content
+    assert "missing: rport" in text
+    assert "Nothing was executed" in text
+
+
+def test_a_refusal_names_an_argument_that_is_not_accepted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    args = {**_full_args(), "extra": "field"}
+
+    with caplog.at_level("WARNING", logger="pentaia.graph"):
+        result = approval_gate_node({"messages": [_ai_message_with(args)]})
+
+    assert any(
+        "missing=[] unexpected=['extra']" in record.getMessage()
+        for record in caplog.records
+    )
+    assert "not accepted: extra" in result["messages"][0].content
+
+
+def test_a_refusal_with_all_arguments_present_blames_the_values() -> None:
+    """Names all correct, so the registry or parameter validation refused the values."""
+    from pentaia.phase3_tools import phase3_controlled_validation
+
+    args = {**_full_args(), "rport": 0}
+
+    result = approval_gate_node({"messages": [_ai_message_with(args)]})
+
+    text = result["messages"][0].content
+    assert "not one PentAiA can run" in text
+    assert "missing:" not in text
+    # The model-visible schema is exactly the runtime contract, so a refusal here is
+    # never about an injected argument the model was never asked for.
+    assert set(PHASE3_TOOL_ARGUMENTS) == set(
+        phase3_controlled_validation.tool_call_schema.model_json_schema()["required"]
+    )
+
+
+def test_a_refusal_from_a_non_dict_argument_list_stays_safe() -> None:
+    """LangChain rejects a non-dict args at construction, so guard it directly."""
+    from pentaia.graph import _invalid_proposal_text, _proposal_from_tool_call
+
+    call = {"name": "phase3_controlled_validation", "args": "not-a-dict"}
+
+    assert _proposal_from_tool_call(call) is None
+    assert "Nothing was executed" in _invalid_proposal_text(call)
 
 
 def test_gate_returns_to_the_agent_after_blocking(state: dict | None = None) -> None:
