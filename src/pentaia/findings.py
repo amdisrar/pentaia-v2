@@ -178,3 +178,87 @@ def findings_to_json(findings: list[VulnerabilityFinding]) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+
+    text = str(value)
+
+    return text or None
+
+
+def _is_object(value: object) -> bool:
+    """True only for a mapping, so a record is never silently coerced."""
+    return isinstance(value, dict)
+
+
+def _is_list(value: object) -> bool:
+    """True only for a list, so a JSON array is never silently coerced."""
+    return isinstance(value, list)
+
+
+def finding_from_dict(record: object) -> VulnerabilityFinding:
+    """Rebuild one normalized finding from its serialized form.
+
+    This is the inverse of ``VulnerabilityFinding.to_dict``. It exists so code can
+    recover structured findings from a discovery tool result without re-running
+    discovery. An unusable record raises ``ValueError`` rather than yielding a
+    partial or invented finding.
+    """
+    if not _is_object(record):
+        raise ValueError("Finding record must be an object.")
+
+    target = record.get("target")
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("Finding record must include a target.")
+
+    raw_cve = record.get("cve") or []
+    if isinstance(raw_cve, str):
+        raw_cve = [raw_cve]
+    if not isinstance(raw_cve, list) or any(
+        not isinstance(item, str) for item in raw_cve
+    ):
+        raise ValueError("Finding record must include a list of CVE strings.")
+
+    port = record.get("port")
+    if port is not None and (isinstance(port, bool) or not isinstance(port, int)):
+        raise ValueError("Finding record must include an integer port or null.")
+
+    cvss = record.get("cvss")
+    if cvss is not None and (
+        isinstance(cvss, bool) or not isinstance(cvss, (int, float))
+    ):
+        raise ValueError("Finding record must include a numeric cvss or null.")
+
+    return VulnerabilityFinding(
+        target=target.strip(),
+        port=port,
+        protocol=_optional_text(record.get("protocol")),
+        service=_optional_text(record.get("service")),
+        template_id=str(record.get("template_id") or ""),
+        title=str(record.get("title") or ""),
+        severity=str(record.get("severity") or "unknown").lower(),
+        cve=[item.upper() for item in raw_cve],
+        cvss=float(cvss) if cvss is not None else None,
+        matched_at=_optional_text(record.get("matched_at")),
+        evidence=str(record.get("evidence") or ""),
+        source_tool=str(record.get("source_tool") or "nuclei"),
+    )
+
+
+def findings_from_json(payload: object) -> list[VulnerabilityFinding]:
+    """Parse the normalized JSON array emitted by ``findings_to_json``."""
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("Findings payload must be a non-empty JSON string.")
+
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid findings JSON: {exc.msg}") from exc
+
+    if not _is_list(decoded):
+        raise ValueError("Findings payload must be a JSON array.")
+
+    return [finding_from_dict(record) for record in decoded]

@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
@@ -14,9 +15,12 @@ from pentaia.approval import (
 )
 from pentaia.llm import get_llm
 from pentaia.metasploit_wrapper import prepare_metasploit_parameters
+from pentaia.phase3_candidates import candidate_context, candidates_from_messages
 from pentaia.phase3_results import PHASE3_INTERPRETATION_RULES
 from pentaia.phase3_tools import phase3_controlled_validation
 from pentaia.tools import nmap_service_scan, nuclei_vulnerability_scan
+
+logger = logging.getLogger(__name__)
 
 STATE_CHANGING_TOOL_NAME = "phase3_controlled_validation"
 
@@ -60,6 +64,10 @@ SYSTEM_MESSAGE = SystemMessage(
         "When the tool establishes a reverse session, PentAiA holds that session open on the Kali host and returns "
         "its attach details in the result. Relay those details to the user: you cannot type into the session "
         "yourself and you must not claim to have done so. "
+        "PentAiA may also add a code-owned candidate context describing the validation actions its Test Framework "
+        "supports for the latest discovery findings. Treat that context as authoritative: those are the only "
+        "validation actions available, never invent another, and when no candidate is listed you report the "
+        "findings only and propose no validation. "
         + PHASE3_INTERPRETATION_RULES
     )
 )
@@ -68,6 +76,9 @@ SYSTEM_MESSAGE = SystemMessage(
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     pending_approval: NotRequired[Phase3ApprovalState | None]
+    # Code-owned candidate context derived from the latest discovery result. It is
+    # context for the model to explain and recommend from, never an execution path.
+    validation_context: NotRequired[str]
 
 
 tools = [
@@ -80,8 +91,36 @@ llm = get_llm().bind_tools(tools)
 
 
 def agent_node(state: AgentState) -> AgentState:
-    response = llm.invoke([SYSTEM_MESSAGE, *state["messages"]])
+    prompt: list[BaseMessage] = [SYSTEM_MESSAGE]
+
+    context = state.get("validation_context")
+    if context:
+        prompt.append(SystemMessage(content=context))
+
+    prompt.extend(state["messages"])
+
+    response = llm.invoke(prompt)
     return {"messages": [response]}
+
+
+def candidate_lookup_node(state: AgentState) -> AgentState:
+    """Deterministically check the latest discovery findings against the registry.
+
+    Code decides whether a supported validation exists; the model only ever sees
+    the result. An unsupported finding produces no candidate, so there is nothing
+    for the model to propose.
+    """
+    candidates = candidates_from_messages(state["messages"])
+    context = candidate_context(candidates)
+
+    if candidates:
+        logger.info(
+            "Phase 3 candidate lookup matched candidates=%s actions=%s",
+            len(candidates),
+            sorted({candidate.proposal.action_id for candidate in candidates}),
+        )
+
+    return {"validation_context": context or ""}
 
 
 def _last_ai_message(state: AgentState) -> AIMessage | None:
@@ -207,6 +246,7 @@ def route_after_agent(state: AgentState) -> str:
 graph_builder = StateGraph(AgentState)
 
 graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("candidate_lookup", candidate_lookup_node)
 graph_builder.add_node("approval_gate", approval_gate_node)
 graph_builder.add_node("rejection", rejection_node)
 graph_builder.add_node("stale", stale_approval_node)
@@ -236,7 +276,10 @@ graph_builder.add_conditional_edges(
 graph_builder.add_edge("approval_gate", END)
 graph_builder.add_edge("rejection", "agent")
 graph_builder.add_edge("stale", "agent")
-graph_builder.add_edge("tools", "agent")
+# Every discovery result passes through the deterministic candidate lookup before
+# the model sees it again, so a supported finding is surfaced by code, not guessed.
+graph_builder.add_edge("tools", "candidate_lookup")
+graph_builder.add_edge("candidate_lookup", "agent")
 
 # The in-memory checkpointer preserves one CLI conversation by LangGraph thread_id.
 # The CLI owns that thread/session identifier; it is never exposed to the model.

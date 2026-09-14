@@ -35,7 +35,8 @@ SUPPORTED_VALIDATION_RULES: tuple[ValidationRule, ...] = (
 )
 
 
-def _finding_reference(finding: VulnerabilityFinding) -> str:
+def finding_reference(finding: VulnerabilityFinding) -> str:
+    """Render the traceable reference for one finding, without raw scanner text."""
     parts = [
         f"scanner={finding.source_tool}",
         f"template={finding.template_id or 'not-provided'}",
@@ -69,7 +70,7 @@ def map_finding_to_validation(finding: VulnerabilityFinding) -> ValidationCandid
             target=finding.target,
             rationale=(
                 f"Confirmed Phase 2 finding matched supported validation rule {rule.cve}. "
-                f"Original evidence: {_finding_reference(finding)}. "
+                f"Original evidence: {finding_reference(finding)}. "
                 f"Evidence detail: {finding.evidence}"
             ),
             expected_effect=rule.expected_effect,
