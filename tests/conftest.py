@@ -13,9 +13,41 @@ and a developer's local pool configuration changes the behaviour of tests that
 expect the single-port fallback. Tests must not depend on ambient configuration.
 """
 
+import logging
+
 import pytest
 
 from pentaia.phase3_ports import reset_listener_port_reservations
+
+
+@pytest.fixture(scope="session", autouse=True)
+def redirect_application_log(tmp_path_factory: pytest.TempPathFactory):
+    """Keep the test suite's audit events out of the real logs/pentaia.log.
+
+    Modules call setup_logging() at import time, which installs a FileHandler on
+    logs/pentaia.log. Test runs therefore injected phase3 audit and listener-port
+    events into the developer's production log, which made that log misleading to
+    read back and impossible to correlate with a real CLI run.
+    """
+    target = tmp_path_factory.mktemp("logs") / "pentaia-test.log"
+
+    root = logging.getLogger()
+
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            root.removeHandler(handler)
+            handler.close()
+
+    handler = logging.FileHandler(target)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    )
+    root.addHandler(handler)
+
+    yield
+
+    root.removeHandler(handler)
+    handler.close()
 
 
 @pytest.fixture(autouse=True)
