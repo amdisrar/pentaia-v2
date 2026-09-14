@@ -11,6 +11,7 @@ from pentaia.metasploit_wrapper import (
     MetasploitOperation,
     prepare_metasploit_parameters,
 )
+from pentaia.phase3_artifact import VerificationArtifact
 from pentaia.phase3_ports import (
     release_listener_port,
     reset_listener_port_reservations,
@@ -50,6 +51,20 @@ def isolated_listener_ports():
     reset_listener_port_reservations()
     yield
     reset_listener_port_reservations()
+
+
+@pytest.fixture(autouse=True)
+def no_artifact_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep session tests focused.
+
+    Writing the marker polls the console with real sleeps and has its own tests;
+    here it is stubbed by default so session behaviour stays independent of it.
+    """
+    monkeypatch.setattr(
+        phase3_session,
+        "write_verification_artifact",
+        lambda **kwargs: None,
+    )
 
 
 def _proposal() -> Phase3ActionProposal:
@@ -470,3 +485,86 @@ def test_unknown_action_id_is_rejected(
 
     with pytest.raises(ValueError, match="Unsupported Phase 3 Metasploit action"):
         start_live_session(proposal, _approved(proposal))
+
+
+# --- verification artifact wiring ------------------------------------------
+
+
+def _artifact(action_id: str, target: str, *, verified: bool) -> VerificationArtifact:
+    return VerificationArtifact(
+        path=f"/tmp/pentaia-poc-{'a' * 12}.txt",
+        content="PENTAIA: POC SUCCESSFUL",
+        created=verified,
+        verified=verified,
+        evidence="ok" if verified else "not confirmed",
+    )
+
+
+def test_established_session_writes_the_verification_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_env(monkeypatch)
+    _install_fake_run_command(monkeypatch)
+
+    calls: dict = {}
+
+    def fake_write(**kwargs):
+        calls.update(kwargs)
+        return _artifact(kwargs["action_id"], kwargs["target"], verified=True)
+
+    monkeypatch.setattr(phase3_session, "write_verification_artifact", fake_write)
+
+    proposal = _proposal()
+    session = start_live_session(proposal, _approved(proposal))
+
+    assert calls["action_id"] == "validate_vsftpd_234_backdoor"
+    assert calls["target"] == "172.16.0.64"
+    assert calls["console_session"] == session.session_name
+    assert session.artifact is not None
+    assert session.artifact.verified is True
+
+
+def test_no_artifact_is_written_when_no_session_was_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_env(monkeypatch)
+    _install_fake_run_command(monkeypatch, pane=PANE_WITHOUT_SESSION)
+    monkeypatch.setattr(phase3_session, "wait_for_session", lambda _name: "")
+
+    called = False
+
+    def fake_write(**kwargs):
+        nonlocal called
+        called = True
+        return _artifact("x", "y", verified=True)
+
+    monkeypatch.setattr(phase3_session, "write_verification_artifact", fake_write)
+
+    proposal = _proposal()
+    session = start_live_session(proposal, _approved(proposal))
+
+    assert session.established is False
+    assert session.artifact is None
+    assert called is False
+
+
+def test_unverified_artifact_is_never_reported_as_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_env(monkeypatch)
+    _install_fake_run_command(monkeypatch)
+
+    monkeypatch.setattr(
+        phase3_session,
+        "write_verification_artifact",
+        lambda **kwargs: _artifact(kwargs["action_id"], kwargs["target"], verified=False),
+    )
+
+    proposal = _proposal()
+    session = start_live_session(proposal, _approved(proposal))
+
+    # The session itself stands, but the marker is reported as unconfirmed.
+    assert session.established is True
+    assert session.artifact is not None
+    assert session.artifact.verified is False
+    assert session.artifact.created is False

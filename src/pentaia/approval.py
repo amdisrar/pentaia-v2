@@ -109,10 +109,14 @@ def require_current_phase3_approval(
         raise ValueError("Phase 3 action has not been explicitly approved.")
 
 
-def format_approval_prompt(approval: Phase3ApprovalState) -> str:
+def format_approval_prompt(
+    approval: Phase3ApprovalState,
+    *,
+    note: str | None = None,
+) -> str:
     proposal = approval.proposal
 
-    return (
+    prompt = (
         "Phase 3 approval required\n"
         f"Action: {proposal.action_id}\n"
         f"Target: {proposal.target}\n"
@@ -121,3 +125,8 @@ def format_approval_prompt(approval: Phase3ApprovalState) -> str:
         f"Parameters: {json.dumps(proposal.parameters, sort_keys=True)}\n"
         f"Proposal signature: {proposal.signature()}"
     )
+
+    if note:
+        prompt = f"{prompt}\nNote: {note}"
+
+    return prompt

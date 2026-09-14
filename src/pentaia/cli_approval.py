@@ -7,9 +7,26 @@ from pentaia.approval import (
     format_approval_prompt,
     reject_phase3_action,
 )
+from pentaia.metasploit_wrapper import PREDEFINED_METASPLOIT_OPERATIONS
 from pentaia.phase3_audit import audit_approval
 
 logger = logging.getLogger(__name__)
+
+# Shown before the decision so the human knows the approved action leaves a file
+# on the target. The marker is part of the action's behaviour, not a surprise.
+ARTIFACT_NOTE = (
+    "This action also writes a harmless PentAiA proof marker on the target; "
+    "the exact path is reported after it succeeds."
+)
+
+
+def _approval_note(approval: Phase3ApprovalState) -> str | None:
+    operation = PREDEFINED_METASPLOIT_OPERATIONS.get(approval.proposal.action_id)
+
+    if operation is not None and operation.establishes_reverse_session:
+        return ARTIFACT_NOTE
+
+    return None
 
 
 def resolve_cli_approval(
@@ -26,7 +43,7 @@ def resolve_cli_approval(
     if approval.decision != "pending":
         raise ValueError("CLI approval requires a pending approval state.")
 
-    output_func(format_approval_prompt(approval))
+    output_func(format_approval_prompt(approval, note=_approval_note(approval)))
 
     while True:
         answer = input_func("\nApprove this exact action? [y/N]: ").strip().lower()

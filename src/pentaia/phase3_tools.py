@@ -28,10 +28,12 @@ Phase3ActionId = Literal["validate_vsftpd_234_backdoor"]
 # host, because PentAiA never drives an interactive session itself. The operator
 # takes it over from the printed console.
 SESSION_HANDOFF = (
-    "A reverse session is held open in the PentAiA console on the Kali host. "
-    "The operator takes it over by running the attach command on Kali, listing "
-    "sessions with 'sessions', and selecting one with 'sessions -i <id>'. "
-    "PentAiA issues no further commands through that session."
+    "A reverse session is held open in the PentAiA console on the Kali host, and "
+    "the approved action left a harmless code-owned proof marker on the target. "
+    "The operator takes the session over by running the attach command on Kali, "
+    "listing sessions with 'sessions', and selecting one with 'sessions -i <id>'. "
+    "PentAiA issues no further commands through that session. Report the exact "
+    "marker path, and state plainly if the marker could not be confirmed."
 )
 
 
@@ -202,12 +204,22 @@ def _run_phase3_validation_tool(
         )
 
     if holds_session:
+        # The artifact result is part of the normalized evidence: a marker that
+        # could not be confirmed must never be presented as proof of success.
+        session_evidence = session.evidence
+        if session.artifact is not None:
+            artifact = session.artifact
+            session_evidence = (
+                f"{session_evidence}\nartifact: {artifact.path} "
+                f"verified={artifact.verified}"
+            )
+
         status = "success" if session.established else "failed"
         normalized = normalize_phase3_result(
             proposal=proposal,
             approval=approval,
             tool_status=status,
-            session_evidence=session.evidence,
+            session_evidence=session_evidence,
         )
         session_payload = (
             {
@@ -216,6 +228,9 @@ def _run_phase3_validation_tool(
                 "lhost": session.lhost,
                 "lport": session.lport,
                 "attach": session.attach,
+                "verification_artifact": (
+                    session.artifact.to_dict() if session.artifact is not None else None
+                ),
                 "handoff": SESSION_HANDOFF,
             }
             if session.established

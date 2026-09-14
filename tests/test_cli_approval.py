@@ -235,3 +235,27 @@ def test_stale_approval_signature_changes_with_proposal() -> None:
     )
 
     assert original.signature() != changed.signature()
+
+
+def test_approval_prompt_tells_the_human_about_the_proof_marker() -> None:
+    """The marker is part of the approved action, so it must not be a surprise."""
+    output: list[str] = []
+
+    resolve_cli_approval(
+        create_pending_approval(_proposal()),
+        input_func=lambda _: "n",
+        output_func=output.append,
+    )
+
+    rendered = "\n".join(output)
+
+    assert "proof marker" in rendered
+    assert "the exact path is reported" in rendered
+
+
+def test_prompt_without_a_note_has_no_note_line() -> None:
+    from pentaia.approval import format_approval_prompt
+
+    rendered = format_approval_prompt(create_pending_approval(_proposal()))
+
+    assert "Note:" not in rendered

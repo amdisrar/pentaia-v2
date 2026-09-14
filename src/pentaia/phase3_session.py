@@ -21,6 +21,7 @@ import re
 import shlex
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from pentaia.approval import (
@@ -34,6 +35,14 @@ from pentaia.metasploit_wrapper import (
     PREDEFINED_METASPLOIT_OPERATIONS,
     MetasploitOperation,
     build_live_console_script,
+)
+from pentaia.phase3_artifact import (
+    VerificationArtifact,
+    artifact_content,
+    artifact_path,
+    artifact_verified,
+    build_cleanup_command,
+    build_write_command,
 )
 from pentaia.phase3_ports import (
     activate_listener_port,
@@ -58,6 +67,11 @@ CAPTURE_LINES = 400
 # rather than sleeping for a fixed worst case, so a fast catch returns fast.
 POLL_ATTEMPTS = 15
 POLL_DELAY_SECONDS = 2.0
+
+# Writing the marker goes out through the caught session, so allow it a moment to
+# come back before concluding that it failed.
+ARTIFACT_POLL_ATTEMPTS = 6
+ARTIFACT_POLL_DELAY_SECONDS = 1.0
 
 # tmux session names may not contain '.' or ':', so anything outside this set is
 # replaced before the name is ever placed in a command.
@@ -85,6 +99,7 @@ class LiveSession:
     evidence: str
     established: bool
     attach: str
+    artifact: VerificationArtifact | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -306,6 +321,8 @@ def start_live_session(
     evidence = wait_for_session(name)
     established = session_established(evidence)
 
+    artifact: VerificationArtifact | None = None
+
     if not established:
         # Never leave a console holding the listener port on a failed attempt.
         stop_live_session(name)
@@ -313,6 +330,14 @@ def start_live_session(
             action_id=proposal.action_id,
             target=target,
             rport=proposal.parameters["rport"],
+        )
+    else:
+        # The approved action leaves a harmless code-owned marker on the target so
+        # a successful validation has evidence on the box, not only in the pane.
+        artifact = write_verification_artifact(
+            console_session=name,
+            action_id=proposal.action_id,
+            target=target,
         )
 
     return LiveSession(
@@ -325,4 +350,105 @@ def start_live_session(
         evidence=evidence if established else "",
         established=established,
         attach=attach_command(name),
+        artifact=artifact,
     )
+
+
+def send_console_line(console_session: str, line: str) -> None:
+    """Type one code-owned line into a held console and press Enter."""
+    name = validate_session_name(console_session)
+
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError("Console line must be a non-empty string.")
+
+    run_command(
+        f"{TMUX_BINARY} send-keys -t {name} {shlex.quote(line.strip())} Enter",
+        timeout=TMUX_TIMEOUT,
+    )
+
+
+def write_verification_artifact(
+    *,
+    console_session: str,
+    action_id: str,
+    target: str,
+    attempts: int = ARTIFACT_POLL_ATTEMPTS,
+    delay: float = ARTIFACT_POLL_DELAY_SECONDS,
+    sleeper: Any = time.sleep,
+    now: Any = None,
+) -> VerificationArtifact:
+    """Write the proof-of-success marker through the held session and read it back.
+
+    A failure here is reported plainly: ``created``/``verified`` stay false and the
+    caller must not present it as proof.
+    """
+    path = artifact_path(action_id=action_id, target=target)
+    timestamp = (now or _utc_now)()
+    content = artifact_content(
+        action_id=action_id,
+        target=target,
+        timestamp=timestamp,
+    )
+
+    send_console_line(
+        console_session,
+        build_write_command(path=path, content=content),
+    )
+
+    pane = ""
+
+    for attempt in range(attempts):
+        pane = capture_session_evidence(console_session)
+
+        if artifact_verified(pane_text=pane, content=content):
+            logger.info(
+                "Phase 3 verification artifact written path=%s verified=%s",
+                path,
+                True,
+            )
+            return VerificationArtifact(
+                path=path,
+                content=content,
+                created=True,
+                verified=True,
+                evidence=f"Verified on target: {path}",
+            )
+
+        if attempt < attempts - 1:
+            sleeper(delay)
+
+    logger.warning(
+        "Phase 3 verification artifact could not be confirmed path=%s",
+        path,
+    )
+
+    return VerificationArtifact(
+        path=path,
+        content=content,
+        created=False,
+        verified=False,
+        evidence="The proof-of-success marker could not be confirmed on the target.",
+    )
+
+
+def remove_verification_artifact(
+    *,
+    console_session: str,
+    action_id: str,
+    target: str,
+) -> bool:
+    """Remove the marker from the target through the held session."""
+    path = artifact_path(action_id=action_id, target=target)
+
+    send_console_line(
+        console_session,
+        build_cleanup_command(path=path),
+    )
+
+    logger.info("Phase 3 verification artifact removal requested path=%s", path)
+
+    return True
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
