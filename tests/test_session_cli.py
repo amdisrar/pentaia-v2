@@ -35,7 +35,6 @@ def _install_fake_run_command(
     sessions: list[str] | None = None,
     list_ok: bool = True,
     pane: str = "",
-    send_keys_ok: bool = True,
 ) -> list[str]:
     issued: list[str] = []
 
@@ -49,9 +48,6 @@ def _install_fake_run_command(
 
         if command.startswith("tmux capture-pane"):
             return pane, "", 0
-
-        if command.startswith("tmux send-keys"):
-            return "", "" if send_keys_ok else "no such session", 0 if send_keys_ok else 1
 
         return "", "", 0
 
@@ -203,13 +199,39 @@ def test_digest_is_recovered_from_the_session_name() -> None:
     assert session_digest_from_name("my-own-shell") is None
 
 
-# --- close and cleanup -----------------------------------------------------
+# --- close -----------------------------------------------------------------
 
 
-def test_close_removes_the_marker_and_releases_the_port(
+def test_close_never_types_a_deletion_into_the_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """PentAiA keeps the proof marker: closing a console must not touch the target.
+
+    The marker is the evidence that the approved action ran, so it outlives the
+    session and removing it stays the operator's decision on the target itself.
+    """
     issued = _install_fake_run_command(monkeypatch, sessions=[_row()])
+    monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: True)
+
+    result = close_live_session(NAME)
+
+    assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
+    assert "left in place" in result.artifact_message
+
+    # Nothing is typed into the console and nothing is deleted.
+    assert not any(command.startswith("tmux send-keys") for command in issued)
+    assert not any("rm " in command for command in issued)
+    assert not any("rm -f" in command for command in issued)
+
+    # The only thing close does to the host is stop the console.
+    assert [command for command in issued if "kill-session" in command] != []
+    assert any(command.startswith("tmux kill-session") for command in issued)
+
+
+def test_close_releases_the_port_recorded_in_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_run_command(monkeypatch, sessions=[_row()])
     released: list[dict] = []
 
     monkeypatch.setattr(
@@ -221,10 +243,7 @@ def test_close_removes_the_marker_and_releases_the_port(
     result = close_live_session(NAME)
 
     assert result.closed is True
-    assert result.artifact_removed is True
     assert result.port_released is True
-    assert any("rm -f" in command for command in issued)
-    assert any(command.startswith("tmux kill-session") for command in issued)
     assert released == [
         {
             "action_id": "validate_vsftpd_234_backdoor",
@@ -234,31 +253,17 @@ def test_close_removes_the_marker_and_releases_the_port(
     ]
 
 
-def test_close_can_keep_the_marker_and_says_so(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    issued = _install_fake_run_command(monkeypatch, sessions=[_row()])
-    monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: True)
-
-    result = close_live_session(NAME, remove_artifact=False)
-
-    assert result.artifact_removed is False
-    assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
-    assert "remains on the target" in result.artifact_message
-    # Cleanup must be a code-owned operation, and skipping it must not send one.
-    assert not any("rm -f" in command for command in issued)
-
-
 def test_close_reports_the_marker_path_even_when_the_session_is_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The digest in the name still locates the marker for cleanup."""
+    """The digest in the name still locates the marker for the report."""
     _install_fake_run_command(monkeypatch, sessions=[])
     monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: False)
 
     result = close_live_session(NAME)
 
     assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
+    assert "left in place" in result.artifact_message
 
 
 @pytest.mark.parametrize("rport", ["", "not-a-port", "21; rm -rf /"])
@@ -266,7 +271,7 @@ def test_close_tolerates_unreadable_port_metadata(
     monkeypatch: pytest.MonkeyPatch,
     rport: str,
 ) -> None:
-    """Metadata comes back from tmux, so a bad port must not abort the cleanup."""
+    """Metadata comes back from tmux, so a bad port must not abort the close."""
     _install_fake_run_command(monkeypatch, sessions=[_row(rport=rport)])
     released: list[dict] = []
     monkeypatch.setattr(
@@ -280,19 +285,17 @@ def test_close_tolerates_unreadable_port_metadata(
     assert result.port_released is False
     assert released == []
     assert result.closed is True
-    assert result.artifact_removed is True
 
 
-def test_close_removes_the_marker_named_by_the_session_without_metadata(
+def test_close_names_the_marker_from_the_session_without_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The live failure: empty metadata made cleanup delete a different file.
+    """Empty metadata must not produce a marker path derived from empty inputs.
 
-    Deriving the marker path from metadata turned a missing target into
-    ``rm -f /tmp/pentaia-poc-e7ac0786668e.txt`` -- a file that never existed --
-    while the real marker stayed on the target and the CLI reported success.
+    Re-deriving the path from a missing target once produced a marker path hashed
+    from two empty strings, which is a file that never existed.
     """
-    issued = _install_fake_run_command(
+    _install_fake_run_command(
         monkeypatch,
         sessions=[
             _row(
@@ -311,38 +314,7 @@ def test_close_removes_the_marker_named_by_the_session_without_metadata(
     result = close_live_session(NAME)
 
     assert result.artifact_path == f"/tmp/pentaia-poc-{DIGEST}.txt"
-
-    cleanup = [command for command in issued if "rm -f" in command]
-    assert len(cleanup) == 1
-    assert f"/tmp/pentaia-poc-{DIGEST}.txt" in cleanup[0]
-    # The digest of two empty strings must never be what cleanup targets.
-    assert "e7ac0786668e" not in cleanup[0]
-
-
-def test_removal_refuses_a_path_outside_the_marker_directory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_fake_run_command(monkeypatch, sessions=[_row()])
-
-    for path in ("/etc/passwd", "/tmp", "", "rm -rf /"):
-        with pytest.raises(ValueError):
-            phase3_session.remove_verification_artifact(
-                console_session=NAME,
-                path=path,
-            )
-
-
-def test_close_does_not_claim_removal_when_the_console_rejects_the_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ignored send-keys exit code is how a cleanup gets claimed but never sent."""
-    _install_fake_run_command(monkeypatch, sessions=[_row()], send_keys_ok=False)
-    monkeypatch.setattr(phase3_session, "release_listener_port", lambda **k: True)
-
-    result = close_live_session(NAME)
-
-    assert result.artifact_removed is False
-    assert "may still be on the target" in result.artifact_message
+    assert "e7ac0786668e" not in result.artifact_message
 
 
 # --- metadata durability ---------------------------------------------------
@@ -420,13 +392,13 @@ def test_lifecycle_events_are_structured_and_avoid_raw_output(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("INFO", logger="pentaia.phase3.session"):
-        audit_session_event("closed", session=NAME, stopped=True, artifact_removed=True)
+        audit_session_event("closed", session=NAME, stopped=True, artifact_path="/tmp/x.txt")
 
     line = caplog.records[0].getMessage()
 
     assert "phase3 session event=closed" in line
     assert f"session={NAME}" in line
-    assert "artifact_removed=True" in line
+    assert "artifact_path=/tmp/x.txt" in line
 
 
 # --- cli -------------------------------------------------------------------
@@ -549,7 +521,9 @@ def test_cli_attach_marks_the_session_handed_off(
     assert "no further commands" in "\n".join(captured)
 
 
-def test_cli_close_reports_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_close_reports_where_the_marker_was_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = HeldSession(
         name=NAME,
         target="172.16.0.64",
@@ -564,12 +538,11 @@ def test_cli_close_reports_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         session_cli,
         "close_live_session",
-        lambda name, remove_artifact=True: phase3_session.SessionClose(
+        lambda name: phase3_session.SessionClose(
             name=name,
             closed=True,
             artifact_path="/tmp/x.txt",
-            artifact_removed=remove_artifact,
-            artifact_message="Removal of /tmp/x.txt was requested on the target.",
+            artifact_message="The proof marker was left in place on the target at /tmp/x.txt.",
             port_released=True,
         ),
     )
@@ -579,10 +552,14 @@ def test_cli_close_reports_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
 
     rendered = "\n".join(captured)
     assert "Closed:" in rendered
+    assert "left in place" in rendered
     assert "port was released" in rendered
 
 
-def test_cli_close_keep_artifact_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_close_cannot_be_asked_to_delete_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old cleanup flag is gone; passing it must not delete anything."""
     session = HeldSession(
         name=NAME,
         target="172.16.0.64",
@@ -597,23 +574,25 @@ def test_cli_close_keep_artifact_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(session_cli, "find_held_session", lambda _name: session)
 
-    def fake_close(name, *, remove_artifact=True):
-        seen["remove_artifact"] = remove_artifact
+    def fake_close(name):
+        seen["called"] = name
         return phase3_session.SessionClose(
             name=name,
             closed=True,
             artifact_path="/tmp/x.txt",
-            artifact_removed=False,
-            artifact_message="The proof marker remains on the target at /tmp/x.txt.",
+            artifact_message="The proof marker was left in place on the target at /tmp/x.txt.",
             port_released=False,
         )
 
     monkeypatch.setattr(session_cli, "close_live_session", fake_close)
     captured: list[str] = []
 
-    assert run_session_command(["close", NAME, "--keep-artifact"], output=captured.append) == 0
-    assert seen["remove_artifact"] is False
-    assert "remains on the target" in "\n".join(captured)
+    assert (
+        run_session_command(["close", NAME, "--keep-artifact"], output=captured.append) == 0
+    )
+    assert seen["called"] == NAME
+    assert "left in place" in "\n".join(captured)
+    assert "--keep-artifact" not in session_cli.USAGE
 
 
 def test_cli_reports_a_failure_without_a_traceback(

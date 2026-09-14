@@ -10,6 +10,11 @@ session on the Kali host, so the handler and the caught shell outlive the SSH
 command that started them. The operator takes over with ``tmux attach`` and
 ``sessions -i <id>``.
 
+PentAiA writes a proof marker on the target and deliberately never removes it.
+Closing a console stops the handler and leaves the marker where the approved
+action put it, so the evidence survives the session and deleting it stays a
+decision the operator makes on the target itself.
+
 Every token in the commands below is a code-owned constant or a value PentAiA has
 already validated (an IPv4 address, a TCP port, a sanitised session name).
 Nothing here is exposed to Gemini as a tool.
@@ -36,13 +41,11 @@ from pentaia.metasploit_wrapper import (
     build_live_console_script,
 )
 from pentaia.phase3_artifact import (
-    ARTIFACT_DIRECTORY,
     VerificationArtifact,
     artifact_content,
     artifact_path,
     artifact_path_for_digest,
     artifact_verified,
-    build_cleanup_command,
     build_write_command,
     session_digest,
 )
@@ -476,36 +479,6 @@ def write_verification_artifact(
     )
 
 
-def remove_verification_artifact(
-    *,
-    console_session: str,
-    path: str,
-) -> bool:
-    """Remove one already-located marker from the target through the held session.
-
-    The path is passed in rather than re-derived from the action and target. That
-    matters: re-deriving it from session metadata turned a missing target into an
-    ``rm -f`` of a different, non-existent file, which reported success while the
-    real marker stayed on the target.
-    """
-    if not isinstance(path, str) or not path.startswith(f"{ARTIFACT_DIRECTORY}/"):
-        raise ValueError("Refusing to remove an artifact outside the marker directory.")
-
-    sent = send_console_line(
-        console_session,
-        build_cleanup_command(path=path),
-    )
-
-    if sent:
-        logger.info("Phase 3 verification artifact removal requested path=%s", path)
-    else:
-        logger.warning(
-            "Phase 3 verification artifact removal could not be sent path=%s", path
-        )
-
-    return sent
-
-
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -581,9 +554,9 @@ def set_session_metadata(
 
     A chained ``set-option`` can return success without the options becoming
     readable, and metadata that silently did not apply is worse than none: the CLI
-    then reports the session as unknown and cleanup targets the wrong marker. So the
-    write is read back, and a chain that did not take effect is retried one option
-    at a time before the failure is reported.
+    then reports a live console as unknown. So the write is read back, and a chain
+    that did not take effect is retried one option at a time before the failure is
+    reported.
     """
     name = validate_session_name(console_session)
 
@@ -728,7 +701,6 @@ class SessionClose:
     name: str
     closed: bool
     artifact_path: str
-    artifact_removed: bool
     artifact_message: str
     port_released: bool
 
@@ -736,16 +708,12 @@ class SessionClose:
         return asdict(self)
 
 
-def close_live_session(
-    console_session: str,
-    *,
-    remove_artifact: bool = True,
-) -> SessionClose:
-    """Close one held session, optionally removing its marker.
+def close_live_session(console_session: str) -> SessionClose:
+    """Close one held session and report where its proof marker was left.
 
-    Cleanup is a code-owned operation and its result is audited. When the marker is
-    deliberately kept, or its removal cannot be confirmed, PentAiA says so plainly
-    and reports the exact path rather than implying the target was left clean.
+    PentAiA never deletes anything on the target. Closing a console stops the held
+    Metasploit handler, and the marker stays where the approved action wrote it, so
+    the evidence outlives the session and the operator decides what to do with it.
     """
     name = validate_session_name(console_session)
     held = find_held_session(name)
@@ -761,35 +729,11 @@ def close_live_session(
     elif held is not None:
         artifact_path = held.artifact_path
 
-    artifact_removed = False
     artifact_message = ""
 
-    if remove_artifact and artifact_path and held is not None:
-        artifact_removed = remove_verification_artifact(
-            console_session=name,
-            path=artifact_path,
-        )
-
-        if artifact_removed:
-            artifact_message = f"Removal of {artifact_path} was requested on the target."
-            audit_session_event(
-                "artifact_removed",
-                session=name,
-                artifact_path=artifact_path,
-            )
-        else:
-            artifact_message = (
-                f"The console did not accept the cleanup, so {artifact_path} may "
-                "still be on the target."
-            )
-            audit_session_event(
-                "artifact_removal_failed",
-                session=name,
-                artifact_path=artifact_path,
-            )
-    elif artifact_path:
+    if artifact_path:
         artifact_message = (
-            f"The proof marker remains on the target at {artifact_path}."
+            f"The proof marker was left in place on the target at {artifact_path}."
         )
         audit_session_event(
             "artifact_retained",
@@ -834,14 +778,13 @@ def close_live_session(
         "closed",
         session=name,
         stopped=stopped,
-        artifact_removed=artifact_removed,
+        artifact_path=artifact_path or "unknown",
     )
 
     return SessionClose(
         name=name,
         closed=stopped,
         artifact_path=artifact_path,
-        artifact_removed=artifact_removed,
         artifact_message=artifact_message,
         port_released=port_released,
     )

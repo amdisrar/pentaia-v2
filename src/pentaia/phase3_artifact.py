@@ -4,9 +4,10 @@ After a supported action establishes a session, PentAiA leaves a small, harmless
 marker on the authorized target so a successful validation produces evidence *on
 the box* and not only in a console pane.
 
-Everything about the artifact is code-owned: the path, the contents, the write
-command and the cleanup command. The model supplies none of it, and the marker is
-part of the action the human already approved.
+Everything about the artifact is code-owned: the path, the contents and the write
+command. The model supplies none of it, and the marker is part of the action the
+human already approved. PentAiA never removes the marker afterwards: it is the
+evidence, and deleting it stays the operator's decision on the target.
 
 This module is deliberately pure -- no I/O, no tmux, no SSH -- so the command
 construction and the read-back verification are testable in isolation. The session
@@ -116,13 +117,6 @@ def build_write_command(*, path: str, content: str) -> str:
     parts.append(f"cat {quoted_path}")
 
     return f'sessions {CONSOLE_RUN_FLAG} "{_require_console_safe(" && ".join(parts))}"'
-
-
-def build_cleanup_command(*, path: str) -> str:
-    """Build the console line that removes the marker."""
-    inner = f"rm -f {shlex.quote(path)}"
-
-    return f'sessions {CONSOLE_RUN_FLAG} "{_require_console_safe(inner)}"'
 
 
 def artifact_verified(*, pane_text: object, content: str) -> bool:

@@ -154,6 +154,10 @@ These are architectural requirements and should not be weakened while adding fea
 16. Credentials/secrets must not enter LangGraph state, browser output, audit records, or logs.
 17. Approval state must never be model-supplied.
 18. Future GUI/API layers must not allow the browser to call internal wrappers directly.
+19. PentAiA never deletes anything on the target. The proof marker is written by the
+    approved action and is deliberately left in place when the console closes: it is
+    the evidence, and removing it stays the operator's decision on the target itself.
+    Do not "restore" marker cleanup - it was removed on purpose, twice.
 
 ======================================================================
 6. CURRENT SOURCE MODULES

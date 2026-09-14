@@ -28,8 +28,10 @@ USAGE = (
     "  list                      List PentAiA consoles held on the Kali host\n"
     "  show <name>               Show lifecycle details and recent console output\n"
     "  attach <name>             Print the command that takes the session over on Kali\n"
-    "  close <name> [--keep-artifact]\n"
-    "                            Close a session, removing its proof marker by default\n"
+    "  close <name>              Close a session and report where its marker was left\n"
+    "\n"
+    "PentAiA never removes the proof marker from the target; closing a session\n"
+    "stops the Metasploit handler and leaves the marker in place.\n"
 )
 
 
@@ -116,7 +118,6 @@ def _close(argv: list[str], output: Callable[[str], None]) -> int:
         return 2
 
     name = argv[0]
-    remove_artifact = "--keep-artifact" not in argv[1:]
 
     session = find_held_session(name)
 
@@ -124,18 +125,12 @@ def _close(argv: list[str], output: Callable[[str], None]) -> int:
         output(f"No PentAiA session named {name} is running on the Kali host.")
         return 1
 
-    result = close_live_session(name, remove_artifact=remove_artifact)
+    result = close_live_session(name)
 
     output(f"Closed: {result.name}" if result.closed else f"Could not close {result.name}.")
 
     if result.artifact_message:
         output(result.artifact_message)
-
-    if not remove_artifact and result.artifact_path:
-        output(
-            "The marker was kept deliberately; remove it yourself if that is not "
-            "what you intended."
-        )
 
     if result.port_released:
         output("The reserved listener port was released.")

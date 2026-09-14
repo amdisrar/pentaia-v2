@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from pentaia.phase3_artifact import (
@@ -8,7 +10,6 @@ from pentaia.phase3_artifact import (
     artifact_content,
     artifact_path,
     artifact_verified,
-    build_cleanup_command,
     build_write_command,
     session_digest,
 )
@@ -123,11 +124,19 @@ def test_the_shell_flag_is_used_not_the_meterpreter_flag() -> None:
     assert "sessions -C " not in command
 
 
-def test_cleanup_command_removes_only_the_marker() -> None:
-    path = artifact_path(action_id=ACTION, target=TARGET)
-    command = build_cleanup_command(path=path)
+def test_the_module_exposes_no_way_to_delete_the_marker() -> None:
+    """PentAiA writes the proof marker and deliberately never removes it.
 
-    assert command == f'sessions -c "rm -f {path}"'
+    Removing it stays the operator's decision on the target, so the module must not
+    offer a builder that would let a future change quietly erase the evidence.
+    """
+    from pentaia import phase3_artifact
+
+    assert not hasattr(phase3_artifact, "build_cleanup_command")
+
+    source = phase3_artifact.__file__
+    assert source is not None
+    assert "rm -f" not in Path(source).read_text()
 
 
 def test_commands_reject_content_that_would_break_the_console_argument() -> None:
