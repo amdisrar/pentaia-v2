@@ -39,7 +39,7 @@
 12. [Web Session Model](#12-web-session-model)
 13. [Conversation and LangGraph Session Model](#13-conversation-and-langgraph-session-model)
 14. [Human Approval Workflow in the Web GUI](#14-human-approval-workflow-in-the-web-gui)
-15. [Target Authorization and Existing Phase 3 Controls](#15-target-authorization-and-existing-phase-3-controls)
+15. [Browser-Reachable API Surface and Target Authorization](#15-browser-reachable-api-surface-and-target-authorization)
 16. [Accounting and Audit Architecture](#16-accounting-and-audit-architecture)
 17. [Secret and Configuration Ownership](#17-secret-and-configuration-ownership)
 18. [Local Break-Glass and Recovery CLI](#18-local-break-glass-and-recovery-cli)
@@ -1283,8 +1283,6 @@ Requirements:
 - accounting and server-side web-session records survive application restart
 - LangGraph thread/checkpoint state remains outside this store in Phase 4
 - repository interfaces must avoid coupling business logic directly to SQLite so a later database migration remains possible
-
-### 17.2 Application-Owned Configuration
 
 ### 17.2 Application-Owned Configuration
 
