@@ -204,6 +204,82 @@ Copy the keys you need into `.env` (loaded automatically):
 | `PENTAIA_PHASE3_ALLOWLIST` | targets Phase 3 may touch |
 | `PENTAIA_PHASE3_DENYLIST` | targets Phase 3 must never touch |
 | `PENTAIA_NUCLEI_DENYLIST` | Nuclei template denylist |
+| `PENTAIA_WEB_HOST`, `PENTAIA_WEB_PORT` | web application bind address (default `127.0.0.1:8000`) |
+| `PENTAIA_WEB_DOCS` | enable `/docs` (default false) |
+| `PENTAIA_AD_HOST` | Active Directory domain controller, bare host (required for AD) |
+| `PENTAIA_AD_PORT` | LDAPS port, default `636` |
+| `PENTAIA_AD_CA_FILE` | optional private CA bundle for LDAPS |
+| `PENTAIA_AD_CONNECT_TIMEOUT` | LDAPS connect timeout in seconds, default `5` |
+| `PENTAIA_AD_RECEIVE_TIMEOUT` | LDAPS read timeout in seconds, default `5` |
+
+### Active Directory (LDAPS) authentication
+
+Implemented in `src/pentaia/webapp/auth/`. Phase 4 uses a **direct-user bind**: the
+supplied username and password are bound straight to Active Directory. No service
+account, no directory search and no base DN are needed, so there is no filter to inject
+into and no stored directory credential.
+
+The username must be a **UPN**, `user@example.com`. PentAiA builds the canonical
+identity from the username it was given, so accepting both the UPN and the down-level
+`DOMAIN\user` form would give one AD principal two different identities
+(`ad:user@example.com` and `ad:example\user`). The down-level form is therefore refused
+rather than converted, because converting would mean guessing a UPN suffix — and
+resolving it properly would require exactly the directory search this provider avoids.
+A single-label suffix such as `user@example` is accepted; no dot is required.
+
+Transport rules are deliberate and not configurable:
+
+- **LDAPS only.** There is no plaintext `ldap://` path for password authentication.
+- **Certificate validation is mandatory.** The chain *and* the server name are verified.
+  There is no "ignore verification" mode, and setting an environment variable that
+  implies one (`PENTAIA_AD_VERIFY_TLS`, `PENTAIA_AD_INSECURE`, …) is **refused** rather
+  than ignored, so a deployment cannot believe a downgrade took effect.
+- **System trust store by default.** `PENTAIA_AD_CA_FILE` points at a private CA bundle
+  when the enterprise CA is not in the system store; the file must exist and be readable.
+- **Bounded timeouts.** Every connect and read is bounded and validated at startup.
+- **No directory read on connect**, and referrals are never followed.
+- **No AD group or role mapping.** Phase 4 does not implement RBAC.
+
+Authentication outcomes are normalized to `SUCCESS`, `REJECTED`, `UNAVAILABLE` or
+`MISCONFIGURED`, and everything that is not an explicit success fails closed. A rejected
+credential and an unknown user are indistinguishable to a caller. Passwords are used for
+one bind and never stored, logged, returned or placed in session state.
+
+Provider selection (`PENTAIA_AUTH_PROVIDER=ad|radius`) and the login route are **not**
+part of this provider: they arrive with P4-07 and the login flow. The provider is
+therefore exercised through its own interface today.
+
+#### Optional real-Active-Directory validation
+
+The normal test suite is offline and needs no domain controller. Against a real Windows
+Server with AD DS and LDAPS on 636:
+
+```bash
+# 1. valid UPN + valid password, and 2. wrong password, and 3. unknown user
+PENTAIA_AD_HOST=dc01.example.test \
+PENTAIA_AD_CA_FILE=/etc/ssl/certs/enterprise-ca.pem \
+uv run python scripts/ad_ldaps_check.py --attempts 3
+# expect outcome=success with canonical identity ad:user@example.test,
+# then outcome=rejected for the wrong password and for the unknown user
+
+# 4. unreachable DC -> outcome=unavailable (exit code 2)
+PENTAIA_AD_HOST=192.0.2.1 PENTAIA_AD_CONNECT_TIMEOUT=2 \
+uv run python scripts/ad_ldaps_check.py --username user@example.test
+
+# 5. untrusted CA -> outcome=misconfigured (exit code 3): omit PENTAIA_AD_CA_FILE
+PENTAIA_AD_HOST=dc01.example.test uv run python scripts/ad_ldaps_check.py
+
+# 6. trusted private CA -> outcome=success: set PENTAIA_AD_CA_FILE as in step 1
+# 7. hostname/certificate mismatch -> outcome=misconfigured: point PENTAIA_AD_HOST at
+#    an address whose certificate does not carry that name
+# 8. timeout behaviour: set PENTAIA_AD_CONNECT_TIMEOUT=1 against a blackholed address
+
+# 9. confirm the canonical identity is ad:user@example.test
+```
+
+The script reads the password from the terminal without echo, never from the command
+line. Use placeholder values only: no real domain, username, password or CA material
+belongs in the repository or in `.env.example`.
 
 ## Running
 
