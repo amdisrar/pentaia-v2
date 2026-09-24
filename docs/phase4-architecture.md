@@ -6,8 +6,8 @@
 |---|---|
 | Document Title | PentAiA v2 — Phase 4 Web, Identity, Accounting, and CLI Security Architecture |
 | Document ID | PENTAIA-ARCH-P4-01 |
-| Version | 0.1 |
-| Status | Draft |
+| Version | 0.2 |
+| Status | Draft — revised after independent DSH architecture review |
 | Project | PentAiA v2 |
 | Repository | `amdisrar/pentaia-v2` |
 | Related GitHub Issue | #51 — P4-01 Define Phase 4 web, identity, accounting, and CLI security architecture |
@@ -21,6 +21,7 @@
 | Version | Date | Author | Change Summary | Status |
 |---|---|---|---|---|
 | 0.1 | 24 September 2026 | PentAiA project / AI-assisted draft | Initial Phase 4 architecture covering web, identity, sessions, accounting, approvals, secrets, break-glass, Phase 3 compatibility, and implementation mapping | Draft |
+| 0.2 | 24 September 2026 | PentAiA project / merged architecture review | Revised after comparison with the independent DSH architecture draft; resolved deployment, storage, session, conversation-locking, approval-surface, accounting-integrity, break-glass, validation, and implementation-sequencing decisions; added Mermaid architecture diagram | Draft |
 
 ## Table of Contents
 
@@ -317,6 +318,28 @@ Is PentAiA allowed to interact with this target?
 
 These controls serve different purposes and must remain separate.
 
+### 6.5 Resolved Phase 4 Design Decisions
+
+The following decisions are fixed for the Phase 4 implementation unless a later reviewed architecture change explicitly replaces them:
+
+| Area | Phase 4 Decision |
+|---|---|
+| Deployment | Single PentAiA application host, initially the same workstation/WSL host used by the current CLI |
+| TLS | HTTPS terminated by a reverse proxy on the same host; forwarded-protocol headers are trusted only from the configured proxy |
+| Application store | SQLite behind a repository abstraction under `PENTAIA_DATA_DIR` |
+| LangGraph state | Existing in-process/checkpoint behavior remains non-durable across application restart until Phase 5 persistent-memory work |
+| Browser session | Server-side session record; browser receives only an opaque random session cookie |
+| Conversation concurrency | One active turn per conversation, enforced by a server-side per-conversation lock |
+| Progress delivery | Normal request/response plus short polling in Phase 4; add SSE later only if the user experience requires it |
+| Authentication selection | One configured provider per deployment; no automatic fallback between AD and RADIUS |
+| AD default | Direct-user LDAPS bind by default; use a service account only if later directory lookups require one |
+| Approval | Browser submits only approve/reject intent; authoritative proposal and approval state remain server-side |
+| Accounting | Append-only typed event stream with whitelist-based redaction and integrity verification |
+| Break-glass | Web GUI is normal operation; local `pentaia-admin` handles recovery; agent CLI becomes disabled by default once the web path is ready |
+| Phase 4 scaling | No HA, horizontal scaling, or multi-host application topology in this phase |
+
+These decisions deliberately keep Phase 4 small enough for the current lab while preserving a clean path to later persistence, RBAC, and scaling.
+
 ---
 
 ## 7. Target Component Architecture
@@ -373,7 +396,48 @@ These controls serve different purposes and must remain separate.
                                                 Authorized lab targets
 ```
 
-### 7.2 Administrative Recovery Path
+### 7.2 Mermaid Architecture Diagram
+
+The following diagram is maintained directly in Markdown so it remains editable, reviewable, and version-controlled with the architecture document.
+
+```mermaid
+flowchart LR
+    U[End User / Operator]
+    B[Web GUI / Browser]
+    RP[Reverse Proxy<br/>HTTPS / TLS]
+    API[FastAPI Application]
+
+    AUTH[Authentication Provider<br/>AD / LDAPS or RADIUS]
+    SESS[Identity / Web Sessions]
+    CONV[Conversation Service<br/>conversation to thread mapping<br/>per-conversation lock]
+    APPR[Approval Service<br/>server-owned pending approval]
+    ACC[Accounting / Audit<br/>SQLite Store]
+
+    CORE[PentAiA Core<br/>LangGraph + existing Phase 1-3 engine]
+    WRAP[Controlled Wrappers<br/>Nmap / Nuclei / Metasploit]
+    KALI[Kali Executor / SSH]
+    TGT[Authorized Lab Target]
+
+    ADMIN[pentaia-admin<br/>local only]
+    CLI[pentaia CLI<br/>break-glass agent interface]
+
+    U --> B --> RP --> API
+    API --> AUTH
+    API --> SESS
+    API --> CONV
+    API --> APPR
+    API --> ACC
+
+    CONV --> CORE
+    APPR --> CORE
+    CORE --> WRAP --> KALI --> TGT
+
+    ADMIN -. local maintenance .-> API
+    ADMIN -. session and accounting status .-> ACC
+    ADMIN -. enable or disable .-> CLI
+```
+
+### 7.3 Administrative Recovery Path
 
 ```text
 Administrator
@@ -435,6 +499,32 @@ Responsibilities:
 - operational status endpoints
 
 FastAPI must not construct arbitrary native tool commands.
+
+A Phase 4 web package should remain structurally outside the existing core execution modules. The intended dependency direction is:
+
+```text
+web application layer  --->  existing PentAiA core
+existing PentAiA core  -X->  web application layer
+```
+
+This boundary should be protected by an automated import/dependency test so Phase 1–3 code does not gradually become dependent on FastAPI, browser sessions, or web identity.
+
+A practical package layout is:
+
+```text
+src/pentaia/
+  webapp/
+    api/
+    auth/
+    identity/
+    conversations/
+    approval/
+    accounting/
+    static/
+  admin_cli.py
+```
+
+The exact module names may change during implementation, but the dependency direction must not.
 
 ## 8.3 Authentication Provider Layer
 
@@ -582,6 +672,8 @@ PENTAIA_AUTH_PROVIDER=radius
 
 Only configured providers should be initialized.
 
+Phase 4 supports **one active authentication provider per deployment**. It does not automatically fail over from AD to RADIUS or from RADIUS to AD. Provider unavailability fails closed because silent fallback would change the authentication trust path.
+
 Unsupported values must fail closed at application startup.
 
 ### 10.2 Active Directory / LDAPS
@@ -609,8 +701,12 @@ success / failure + normalized identity
 Requirements:
 
 - LDAPS only for password authentication
-- certificate validation
+- certificate validation is mandatory
+- direct-user bind is the Phase 4 default because it proves the supplied password without requiring a stored privileged directory credential
+- a service account may be introduced only if later attribute/group searches require it
 - configurable server/base DN/search behavior
+- explicit CA bundle configuration may be supported for private enterprise CAs; there is no "ignore TLS verification" mode
+- authentication operations require bounded timeouts
 - safe failure messages
 - passwords never stored
 - credentials never logged
@@ -642,7 +738,10 @@ Requirements:
 - RADIUS shared secret is application secret configuration
 - shared secret never exposed to the model/browser
 - password is transient
+- use a maintained RADIUS client library rather than implementing packet/authenticator handling from scratch
+- timeout or retry exhaustion maps to provider unavailable and fails closed
 - provider response normalized to the PentAiA identity model
+- RADIUS attributes do not create Phase 4 roles or target permissions
 
 ### 10.4 Authentication Failure
 
@@ -674,9 +773,15 @@ AuthenticatedUser
 
 ### 11.1 Internal User ID
 
-PentAiA should use a server-owned internal identifier for database/session ownership.
+Phase 4 uses a normalized provider-scoped identity key:
 
-The provider username should not be the only database key.
+```text
+user_id = "<auth_source>:<normalized_username>"
+```
+
+For example, an AD UPN is normalized to lower case and scoped to the provider. This avoids requiring directory read rights only to obtain a secondary immutable identifier.
+
+A later phase may migrate to a rename-stable provider identifier such as AD `objectGUID` if enterprise requirements justify the additional directory lookup and migration work.
 
 ### 11.2 Provider Identity
 
@@ -730,28 +835,35 @@ authentication_provider
 authentication_time
 ```
 
-### 12.1 Cookie Requirements
+### 12.1 Session and Cookie Requirements
 
-The implementation should use secure cookie behavior suitable for the deployment model, including:
+Phase 4 uses server-side session records keyed by a cryptographically random opaque session identifier. The browser cookie is a pointer to that server-side record, not a self-contained bearer of user identity or authorization data.
 
-- HttpOnly
-- Secure when HTTPS is used
-- appropriate SameSite policy
-- opaque session identifier
-- no credentials in cookies
-- no raw provider password/token in cookies
+Required controls:
+
+- 256-bit random session identifier
+- `HttpOnly`
+- `Secure`
+- `SameSite=Lax`
+- `Path=/`
+- no broad `Domain` attribute by default
+- no credentials, provider tokens, tool data, proposal data, or secret configuration in cookies
+- per-session CSRF token on every state-changing browser request
+- a new session identifier after every successful login
+- immediate server-side destruction on logout
+- server-side forced invalidation for recovery/admin use
+- login throttling by normalized username and client IP
+- generic client-facing authentication errors that do not distinguish wrong credentials from provider internals
+- raw session IDs/cookie values are never written to accounting records or normal logs
 
 ### 12.2 Session Expiration
 
-Phase 4 implementation should support:
+Default Phase 4 values are:
 
-- inactivity timeout
-- absolute lifetime where appropriate
-- explicit logout
-- server-side invalidation
-- regeneration after login to prevent fixation
+- idle timeout: 30 minutes, configurable
+- absolute session lifetime: 12 hours, configurable and never extended
 
-Exact timeout values belong in implementation/configuration issues, not P4-01.
+The server records both limits and invalidates the session when either is exceeded. Activity may refresh the idle timer but must not extend the absolute lifetime.
 
 ### 12.3 Session Revocation
 
@@ -803,15 +915,31 @@ conversation.user_id == authenticated_user.user_id
 
 unless a future explicitly designed administrative authorization model permits otherwise.
 
-### 13.3 Phase 4 Persistence
+### 13.3 Phase 4 Conversation Persistence Boundary
 
-P4-13 includes authenticated conversation history/session visibility.
+P4-11 explicitly preserves the current in-process/session-memory behavior until Phase 5 persistent-memory work. Phase 4 therefore does **not** move LangGraph checkpoint/thread state into the application database.
 
-This requires Phase 4 application persistence for conversation metadata and history visibility.
+The consequence must be visible and documented:
 
-This is distinct from **agent long-term memory**.
+> A Phase 4 conversation may become unavailable after the PentAiA application restarts. The GUI must not imply that LangGraph conversation state is durable across restarts.
 
-Long-term semantic memory across unrelated sessions is not introduced by P4-01.
+The SQLite application store may retain identity, session, accounting, and safe conversation metadata required by the Phase 4 UI, but it is not Phase 5 agent memory.
+
+Long-term semantic memory and durable cross-restart agent state remain out of scope.
+
+### 13.4 Conversation Concurrency
+
+Only one active turn may run for a given conversation at a time.
+
+A server-side per-conversation lock must serialize access to the LangGraph thread because `pending_approval` and other workflow values are stateful. A second browser request while a turn is active must receive a clear busy/conflict response rather than interleaving with the current turn.
+
+Different conversations may run independently subject to the existing execution/runtime constraints.
+
+### 13.5 Phase 4 Progress Delivery
+
+Phase 4 begins with normal request/response behavior plus short polling for long-running turn status. Server-Sent Events may be added later if the GUI experience shows a real need for live streaming.
+
+This avoids adding another connection-lifecycle mechanism before the core web workflow is stable.
 
 ---
 
@@ -897,13 +1025,54 @@ The browser must not be able to:
 
 ### 14.4 Concurrent/Stale Approval
 
-If a proposal has changed or already been resolved, the server must reject the browser approval attempt as stale/conflicting.
+If a proposal has changed or already been resolved, the server must reject the browser approval attempt as stale/conflicting. A stale or duplicate approval should be represented as an HTTP conflict, such as `409`, and nothing executes.
+
+Approval resolution must be atomic: a pending proposal can transition to one terminal human decision only once.
+
+The browser submits only an intent such as:
+
+```json
+{"decision": "approve"}
+```
+
+or:
+
+```json
+{"decision": "reject"}
+```
+
+The authoritative proposal, signature, requester identity, and pending approval are loaded server-side. The requester and approver are recorded as separate identity fields even when, in the Phase 4 single-operator model, they are normally the same user. This leaves room for a future two-person approval rule without changing the event/schema model.
 
 Phase 3 stale-signature behavior remains authoritative.
 
 ---
 
-## 15. Target Authorization and Existing Phase 3 Controls
+## 15. Browser-Reachable API Surface and Target Authorization
+
+Phase 4 deliberately keeps the browser API small.
+
+Representative routes:
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/healthz` | unauthenticated liveness only; no environment details |
+| `GET` | `/api/status` | authenticated safe application/provider status |
+| `POST` | `/api/auth/login` | authenticate and create server-side session |
+| `POST` | `/api/auth/logout` | destroy current session |
+| `GET` | `/api/me` | current identity projection |
+| `POST` | `/api/conversations` | create conversation |
+| `GET` | `/api/conversations` | list caller-owned conversations |
+| `GET` | `/api/conversations/{id}` | retrieve caller-owned conversation |
+| `POST` | `/api/conversations/{id}/messages` | submit natural-language user message |
+| `GET` | `/api/conversations/{id}/approval` | read-only projection of current pending approval |
+| `POST` | `/api/conversations/{id}/approval` | submit approve/reject decision only |
+| `GET` | `/api/accounting` | caller's permitted accounting events |
+
+The browser may naturally send a target inside the user's normal conversation text, for example "scan 172.16.0.64". That text remains **untrusted conversational input**.
+
+The browser must never submit an authoritative structured execution target, action ID, tool arguments, runtime parameters, proposal object, approval object, proposal signature, or client-chosen execution correlation identifier. Those values are resolved and validated server-side.
+
+### 15.1 Existing Target Authorization and Phase 3 Controls
 
 Phase 4 authentication does not replace target authorization.
 
@@ -1009,29 +1178,64 @@ The final event set should be implemented incrementally and kept purposeful.
 
 ### 16.3 Proposed Event Model
 
+The implementation should use a typed event object rather than free-form dictionaries or arbitrary log payloads.
+
 Logical fields:
 
 ```text
 event_id
 timestamp
 event_type
+outcome
 user_id
-username/display reference
-authentication_provider
-web_session_id
+auth_source
+session_label
 conversation_id
 langgraph_thread_id
+request_id
+duration_ms
 action_id
 target
 proposal_signature
-outcome/status
-correlation_id
-safe_details
+requester_user_id
+approver_user_id
+error_type
+safe_detail
+previous_record_hash
+record_hash
 ```
 
-Not every event needs every field.
+Not every event needs every field. Raw session-cookie values are never stored; a separate opaque session label may be used for correlation.
 
-### 16.4 Prohibited Audit Content
+### 16.4 Redaction Model
+
+Redaction is **whitelist based**, not blacklist based.
+
+The accounting emitter accepts a typed event object and serializes only explicitly permitted fields. It must not ingest arbitrary request bodies, environment dumps, exception strings, or raw tool output and then attempt to remove secrets afterwards.
+
+Tests must include adversarial values to verify that credentials, keys, cookie values, and secret-like inputs cannot enter serialized events.
+
+### 16.5 Integrity Verification
+
+Accounting records are append-only at the application layer.
+
+Phase 4 adds a simple hash chain:
+
+```text
+record_hash = SHA256(previous_record_hash || canonical_event)
+```
+
+A local administrative command such as:
+
+```text
+pentaia-admin accounting verify
+```
+
+can verify the chain and detect inconsistent modification/deletion inside the event history.
+
+This is **integrity verification / tamper detection**, not a claim of absolute tamper-proof storage. Stronger guarantees would require an external anchor or remote immutable log destination.
+
+### 16.6 Prohibited Audit Content
 
 Never record:
 
@@ -1046,7 +1250,7 @@ Never record:
 
 Existing Phase 3 behavior of storing a stable reference rather than raw evidence text should continue where appropriate.
 
-### 16.5 Audit Truthfulness
+### 16.7 Audit Truthfulness
 
 Audit records must distinguish:
 
@@ -1062,11 +1266,27 @@ PentAiA must not claim ownership of operator actions after explicit handoff.
 
 ---
 
-## 17. Secret and Configuration Ownership
+## 17. Data, Secret and Configuration Ownership
 
 Phase 4 should continue the project's parameter-ownership philosophy.
 
-### 17.1 Application-Owned Configuration
+### 17.1 Application Store
+
+Phase 4 uses SQLite on the PentAiA application host, accessed only through a repository abstraction.
+
+Requirements:
+
+- database and data directory live under `PENTAIA_DATA_DIR`
+- restrictive host permissions; database/data files should be owner-only where supported
+- schema migrations are versioned from the beginning
+- WAL mode and an appropriate busy timeout should be considered during implementation for safe local concurrency
+- accounting and server-side web-session records survive application restart
+- LangGraph thread/checkpoint state remains outside this store in Phase 4
+- repository interfaces must avoid coupling business logic directly to SQLite so a later database migration remains possible
+
+### 17.2 Application-Owned Configuration
+
+### 17.2 Application-Owned Configuration
 
 Examples:
 
@@ -1079,7 +1299,7 @@ audit destination
 application host/port configuration
 ```
 
-### 17.2 Authentication Infrastructure Secrets
+### 17.3 Authentication Infrastructure Secrets
 
 Examples:
 
@@ -1092,7 +1312,7 @@ RADIUS shared secret
 CA/certificate trust configuration
 ```
 
-### 17.3 Existing PentAiA Runtime Configuration
+### 17.4 Existing PentAiA Runtime Configuration
 
 Examples:
 
@@ -1112,7 +1332,7 @@ PENTAIA_PHASE3_DENYLIST
 PENTAIA_NUCLEI_DENYLIST
 ```
 
-### 17.4 Secret Flow Rule
+### 17.5 Secret Flow Rule
 
 Secrets may be consumed only by the component that requires them.
 
@@ -1125,7 +1345,7 @@ They must not be copied into:
 - audit records
 - Git commits
 
-### 17.5 Configuration Validation
+### 17.6 Configuration Validation
 
 Invalid security-sensitive configuration should fail closed at application startup where practical.
 
@@ -1175,11 +1395,23 @@ Therefore:
 - it does not implement another remote password database
 - host access controls protect it
 
-### 18.3 Disabled by Default for Normal Operation
+### 18.3 Three-Interface Split
 
-Normal users should use the GUI.
+Phase 4 deliberately separates:
 
-Break-glass functions should require explicit local administrative invocation.
+| Interface | Purpose | Identity/Trust | Normal State |
+|---|---|---|---|
+| Web GUI | normal operations | AD or RADIUS | enabled |
+| `pentaia` CLI | local break-glass agent interface | server OS access plus explicit enablement | disabled by default once the web workflow is ready |
+| `pentaia-admin` | local maintenance/recovery, no LLM | server OS access / sudo as appropriate | invoked locally when needed |
+
+The existing CLI remains usable during development until the web path is sufficiently complete to become the normal interface. The project must not disable its only working operator interface at the start of Phase 4.
+
+When the transition is made, the agent CLI must fail clearly when disabled and may be enabled only through a predefined local administrative operation. Gemini and normal web users cannot enable it.
+
+Existing `pentaia session list|show|attach|close` functionality is operational maintenance rather than LLM conversation functionality and should move under `pentaia-admin` so held sessions can still be inspected or closed during an enterprise-identity outage.
+
+Break-glass functions require explicit local administrative invocation and never provide arbitrary shell execution.
 
 ### 18.4 Audit
 
@@ -1288,7 +1520,7 @@ The implementation must define fail behavior before Phase 4 production use.
 
 For security-significant operations such as approval, the project should prefer fail-closed behavior if required audit/accounting guarantees cannot be met.
 
-This decision should be finalized during P4-09/P4-12 implementation design.
+Phase 4 decision: authentication/session/accounting read paths may report a degraded service where safe, but a state-changing Phase 3 approval/execution must fail closed if its required durable accounting event cannot be committed. The system must not execute first and silently discover afterwards that the accountable approval/action record could not be stored.
 
 ### 20.8 Web Application Compromise Assumption
 
@@ -1347,8 +1579,14 @@ Even before application RBAC exists, Phase 3 target authorization remains mandat
 
 ## 22. Deployment and Network Security Assumptions
 
-P4-01 does not finalize deployment packaging, but Phase 4 architecture assumes:
+P4-01 defines the initial Phase 4 deployment as a **single-host application** on the PentAiA host currently used by the CLI.
 
+Architecture assumptions:
+
+- a reverse proxy on the same host terminates HTTPS
+- FastAPI/uvicorn runs as an unprivileged application service behind that proxy
+- the application trusts forwarded-protocol information only from the explicitly configured proxy
+- GUI static assets and the JSON API may be served from the same origin to keep cookie, CORS, and CSRF behavior simple
 - the browser reaches PentAiA over HTTPS
 - the FastAPI service is not used as a direct Kali proxy
 - Kali remains on a controlled network path
@@ -1393,41 +1631,30 @@ The P4-01 architecture maps to the current backlog as follows.
 
 ### 23.1 Recommended Implementation Order
 
-The issue numbering already provides a reasonable order, but dependencies should be respected:
+The implementation order should preserve the current working CLI until the web path is ready, while establishing security/accounting foundations before high-risk approval integration.
 
-```text
-P4-01 Architecture
-      |
-      v
-P4-02 FastAPI foundation
-      |
-      +----> P4-03 GUI shell
-      |
-      +----> P4-04 identity/session model
-                  |
-                  +----> P4-05 LDAPS
-                  +----> P4-06 RADIUS
-                  +----> P4-07 provider selection
-                  +----> P4-08 session hardening
-      |
-      +----> P4-09 accounting
-                  |
-                  +----> P4-10 audit viewer
-      |
-      +----> P4-11 LangGraph conversations
-                  |
-                  +----> P4-12 web approval
-                  +----> P4-13 history/session visibility
-      |
-      +----> P4-14 break-glass
-      +----> P4-15 status/admin
-      |
-      +----> P4-16 AD validation
-      +----> P4-17 RADIUS validation
-      +----> P4-18 complete validation
-      +----> P4-19 final documentation
-```
+| Step | Issue(s) | Purpose |
+|---:|---|---|
+| 1 | P4-02 / #52 | FastAPI foundation, config loading, health endpoint, same-origin web foundation, import-boundary test |
+| 2 | P4-09 / #59 | SQLite repository, typed accounting events, whitelist redaction, hash-chain verification |
+| 3 | P4-04 / #54 + P4-08 / #58 | identity model and hardened server-side sessions, CSRF, fixation protection, timeouts, throttling |
+| 4 | P4-05 / #55 + P4-07 / #57 | AD/LDAPS provider and configuration-driven provider selection |
+| 5 | P4-03 / #53 | GUI shell using the defined API surface |
+| 6 | P4-11 / #61 | conversation-to-LangGraph mapping, ownership checks, per-conversation locking |
+| 7 | P4-12 / #62 | web approval workflow reusing existing Phase 3 approval logic unchanged |
+| 8 | P4-13 / #63 | authenticated conversation/history visibility with the restart-persistence limitation clearly shown |
+| 9 | P4-14 / #64 | introduce `pentaia-admin`, move operational session commands, then transition the agent CLI to disabled-by-default |
+| 10 | P4-06 / #56 | RADIUS provider with mocked accept/reject/timeout/malformed coverage |
+| 11 | P4-10 / #60 | caller-visible accounting viewer; all-user administration remains local until later RBAC |
+| 12 | P4-15 / #65 | minimal safe operational/status page |
+| 13 | P4-16 / #66 | real AD/LDAPS end-to-end validation |
+| 14 | P4-17 / #67 | real RADIUS end-to-end validation when a lab RADIUS environment is available |
+| 15 | P4-18 / #68 | complete Phase 4 GUI, identity, accounting, isolation, and approval validation |
+| 16 | P4-19 / #69 | deployment, authentication, accounting, recovery, and known-gap documentation |
 
+If no RADIUS infrastructure is available when P4-17 is reached, #67 remains open as an explicitly documented validation gap. A controlled lab FreeRADIUS instance may be introduced later to complete the end-to-end validation rather than treating mocked tests as equivalent to #67.
+
+Working protocol remains unchanged: one bounded issue at a time, code plus automated tests, operator/lab validation, owner review, then issue closure.
 ---
 
 ## 24. Acceptance Criteria for P4-01
@@ -1452,60 +1679,38 @@ P4-01 is ready for owner review when all of the following are documented:
 - [x] Phase 4 vs later-phase boundary
 - [x] failure/recovery scenarios
 - [x] implementation mapping to P4-02 through P4-19
+- [x] single-host deployment and TLS boundary resolved
+- [x] SQLite application-store decision resolved
+- [x] Phase 4 in-process LangGraph persistence boundary resolved
+- [x] conversation locking model documented
+- [x] browser API surface documented
+- [x] accounting integrity/redaction model documented
+- [x] Mermaid architecture diagram included
 - [ ] owner review and acceptance
 
 No Phase 4 code is required for P4-01 itself.
 
 ---
 
-## 25. Open Design Questions
+## 25. Remaining Implementation Choices and Validation Gap
 
-The following decisions can be finalized during owner review or the corresponding implementation issue.
+Most architecture-level questions raised in v0.1 are resolved in v0.2. The remaining choices are intentionally implementation-level.
 
 ### 25.1 Frontend Technology
 
-The architecture requires a browser GUI but does not yet require a specific frontend framework.
+The architecture requires a same-origin browser GUI but does not mandate a specific frontend framework. P4-03 may choose the smallest maintainable approach that supports login, conversations, approval display, polling, and safe status/accounting views without changing the API/security boundaries in this document.
 
-Options can be evaluated in P4-03.
+### 25.2 Exact CSRF Implementation
 
-### 25.2 Application Database
+CSRF protection is mandatory for state-changing browser requests. The concrete token transport/validation mechanism is selected alongside the session and frontend implementation in P4-04/P4-08.
 
-Phase 4 requires persistence for identities, sessions/conversation metadata, and accounting.
+### 25.3 RADIUS End-to-End Validation
 
-The database technology should be selected before or during P4-02/P4-04/P4-09.
+The RADIUS provider is implemented and tested with mocks in P4-06, but P4-17 requires a real end-to-end environment. If no existing RADIUS service is available, #67 remains open until a controlled lab RADIUS service such as FreeRADIUS is available for validation.
 
-### 25.3 Session Storage Strategy
+### 25.4 Future RBAC Roadmap
 
-Decide whether web sessions are:
-
-- database-backed
-- dedicated session-store backed
-- another server-side design
-
-The browser should still hold only an opaque session reference.
-
-### 25.4 Accounting Fail-Closed Policy
-
-Define which operations must be blocked if durable accounting cannot be written.
-
-State-changing approval/execution should receive special consideration.
-
-### 25.5 Authentication Provider Failover
-
-Phase 4 currently describes configured provider selection, not automatic fallback.
-
-Automatic fallback between AD and RADIUS should not be introduced without explicit design because it changes the authentication trust model.
-
-### 25.6 Application RBAC Roadmap
-
-The GitHub issue states full RBAC is deferred to Phase 5, while the existing Phase 5 backlog also contains persistent memory.
-
-The roadmap should be normalized before those future items begin.
-
-### 25.7 CSRF Implementation
-
-The architecture requires CSRF protection for browser state-changing actions. The concrete mechanism should be chosen alongside the frontend/session implementation.
-
+Phase 4 performs authentication and preserves the existing target-authorization controls; it does not add application RBAC. The backlog currently associates persistent memory with Phase 5 while some earlier wording also referred to later RBAC as Phase 5. That roadmap naming should be normalized before RBAC work begins, without changing the Phase 4 scope.
 ---
 
 ## 26. Summary
@@ -1540,6 +1745,8 @@ Authorized lab target
 ```
 
 The most important architectural rule is that Phase 4 adds identity, usability, accountability, and recovery around the existing PentAiA engine; it does not create a new execution path.
+
+Version 0.2 also fixes the initial implementation model: single-host deployment behind a reverse proxy, SQLite application storage, server-side web sessions, one active turn per conversation, in-process LangGraph state until Phase 5, server-owned approval state, append-only typed accounting with integrity verification, and local-only break-glass administration.
 
 The existing Phase 3 controls remain mandatory:
 
