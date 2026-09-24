@@ -346,83 +346,40 @@ These decisions deliberately keep Phase 4 small enough for the current lab while
 
 ### 7.1 High-Level Architecture
 
-```text
-                         +-----------------------+
-                         |        Browser        |
-                         |       Web GUI         |
-                         +-----------+-----------+
-                                     |
-                                   HTTPS
-                                     |
-                                     v
-                         +-----------------------+
-                         |       FastAPI         |
-                         |  Application Layer    |
-                         +-----------+-----------+
-                                     |
-              +----------------------+----------------------+
-              |                      |                      |
-              v                      v                      v
-     +----------------+     +----------------+     +----------------+
-     | Authentication |     | Web Session /  |     | Accounting /   |
-     |     Layer      |     | Conversation   |     | Audit Layer    |
-     +-------+--------+     +--------+-------+     +----------------+
-             |                       |
-       +-----+-----+                 |
-       |           |                 |
-       v           v                 v
-  +---------+ +---------+   +---------------------+
-  | AD/LDAPS| | RADIUS  |   | Existing LangGraph |
-  +---------+ +---------+   |   PentAiA Engine   |
-                             +----------+----------+
-                                        |
-                                 Existing Phase 1-3
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-                    v                   v                   v
-                  Nmap                Nuclei          Phase 3 tools
-                                                            |
-                                                            v
-                                                     Metasploit wrapper
-                                                            |
-                                                            v
-                                                   kali_executor.py
-                                                            |
-                                                            v
-                                                        Kali Linux
-                                                            |
-                                                            v
-                                                Authorized lab targets
-```
-
-### 7.2 Mermaid Architecture Diagram
-
-The following diagram is maintained directly in Markdown so it remains editable, reviewable, and version-controlled with the architecture document.
+The primary Phase 4 architecture is maintained as a Mermaid diagram so GitHub renders it as a smooth visual diagram rather than ASCII text.
 
 ```mermaid
 flowchart LR
-    U[End User / Operator]
-    B[Web GUI / Browser]
-    RP[Reverse Proxy<br/>HTTPS / TLS]
-    API[FastAPI Application]
+    U["End User / Operator"]
+    B["Web GUI / Browser"]
+    RP["Reverse Proxy<br/>HTTPS / TLS"]
+    API["FastAPI<br/>Application Layer"]
 
-    AUTH[Authentication Provider<br/>AD / LDAPS or RADIUS]
-    SESS[Identity / Web Sessions]
-    CONV[Conversation Service<br/>conversation to thread mapping<br/>per-conversation lock]
-    APPR[Approval Service<br/>server-owned pending approval]
-    ACC[Accounting / Audit<br/>SQLite Store]
+    AUTH["Authentication Layer"]
+    AD["AD / LDAPS"]
+    RAD["RADIUS"]
 
-    CORE[PentAiA Core<br/>LangGraph + existing Phase 1-3 engine]
-    WRAP[Controlled Wrappers<br/>Nmap / Nuclei / Metasploit]
-    KALI[Kali Executor / SSH]
-    TGT[Authorized Lab Target]
+    SESS["Identity / Web Sessions"]
+    CONV["Conversation Service<br/>Conversation ↔ LangGraph Thread<br/>Per-Conversation Lock"]
+    APPR["Approval Service<br/>Server-Owned Pending Approval"]
+    ACC["Accounting / Audit<br/>SQLite Store"]
 
-    ADMIN[pentaia-admin<br/>local only]
-    CLI[pentaia CLI<br/>break-glass agent interface]
+    CORE["PentAiA Core<br/>LangGraph + Existing Phase 1–3"]
+    WRAP["Controlled Tool Wrappers<br/>Nmap / Nuclei / Metasploit"]
+    KALI["Kali Executor<br/>SSH"]
+    TARGET["Authorized Lab Target"]
 
-    U --> B --> RP --> API
+    ADMIN["pentaia-admin<br/>Local Recovery / Maintenance"]
+    CLI["pentaia CLI<br/>Break-Glass Agent Interface"]
+
+    U --> B
+    B -->|HTTPS| RP
+    RP --> API
+
     API --> AUTH
+    AUTH --> AD
+    AUTH --> RAD
+
     API --> SESS
     API --> CONV
     API --> APPR
@@ -430,14 +387,18 @@ flowchart LR
 
     CONV --> CORE
     APPR --> CORE
-    CORE --> WRAP --> KALI --> TGT
+    CORE --> WRAP
+    WRAP --> KALI
+    KALI --> TARGET
 
     ADMIN -. local maintenance .-> API
-    ADMIN -. session and accounting status .-> ACC
-    ADMIN -. enable or disable .-> CLI
+    ADMIN -. accounting / session status .-> ACC
+    ADMIN -. enable / disable .-> CLI
 ```
 
-### 7.3 Administrative Recovery Path
+The browser remains a presentation and intent client. It does not bypass FastAPI, LangGraph, the existing controlled wrappers, or the Phase 3 authorization and approval controls.
+
+### 7.2 Administrative Recovery Path
 
 ```text
 Administrator
