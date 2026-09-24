@@ -622,7 +622,7 @@ A provider abstraction should prevent the rest of the application from depending
 Conceptual configuration:
 
 ```text
-PENTAIA_AUTH_PROVIDER=ldap
+PENTAIA_AUTH_PROVIDER=ad
 ```
 
 or:
@@ -636,6 +636,8 @@ Only configured providers should be initialized.
 Phase 4 supports **one active authentication provider per deployment**. It does not automatically fail over from AD to RADIUS or from RADIUS to AD. Provider unavailability fails closed because silent fallback would change the authentication trust path.
 
 Unsupported values must fail closed at application startup.
+
+For Phase 4, the application-level provider/auth-source token is standardized as `ad` for Active Directory and `radius` for RADIUS. The AD provider still uses the LDAP protocol over LDAPS; `ad` names the authentication backend, while LDAP/LDAPS describes the transport/protocol used to reach Active Directory. This keeps canonical identities consistent, for example `ad:user@example.com`, and avoids mixing `ldap:` and `ad:` prefixes for the same backend.
 
 ### 10.2 Active Directory / LDAPS
 
@@ -740,7 +742,7 @@ Phase 4 uses a normalized provider-scoped identity key:
 user_id = "<auth_source>:<normalized_username>"
 ```
 
-For example, an AD UPN is normalized to lower case and scoped to the provider. This avoids requiring directory read rights only to obtain a secondary immutable identifier.
+For example, an AD UPN is normalized to lower case and scoped to the provider as `ad:<normalized_upn>`. RADIUS identities use `radius:<normalized_username>`. This avoids requiring directory read rights only to obtain a secondary immutable identifier.
 
 A later phase may migrate to a rename-stable provider identifier such as AD `objectGUID` if enterprise requirements justify the additional directory lookup and migration work.
 
@@ -749,10 +751,10 @@ A later phase may migrate to a rename-stable provider identifier such as AD `obj
 Examples:
 
 ```text
-provider = "ldap"
-provider_subject = directory identity reference
+auth_source = "ad"
+provider_subject = normalized Active Directory identity reference
 
-provider = "radius"
+auth_source = "radius"
 provider_subject = normalized authenticated username/reference
 ```
 
