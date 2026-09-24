@@ -125,12 +125,18 @@ def test_every_shipped_asset_is_reachable(path: str) -> None:
 
 
 def test_the_gui_route_is_not_part_of_the_json_api_schema() -> None:
-    """The document is not an API route and must not appear in the schema."""
+    """The document is not an API route and must not appear in the schema.
+
+    Only the GUI concern is asserted here. The exact browser API surface is pinned in
+    tests/test_webapp_app.py and tests/test_webapp_auth.py, so that adding an API route
+    does not require editing this file.
+    """
     with TestClient(create_app(WebAppConfig(docs_enabled=True))) as client:
         paths = client.get("/openapi.json").json()["paths"]
 
     assert "/" not in paths
-    assert set(paths) == {"/healthz", "/api/status"}
+    assert not [path for path in paths if path.startswith("/static")]
+    assert all(path == "/healthz" or path.startswith("/api") for path in paths)
 
 
 def test_unknown_browser_paths_are_not_found(client: TestClient) -> None:

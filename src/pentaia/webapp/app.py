@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from pentaia.webapp.api import API_ROUTERS
 from pentaia.webapp.config import WebAppConfig, load_webapp_config
 from pentaia.webapp.gui import mount_gui
+from pentaia.webapp.sessions import InMemorySessionStore, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +58,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("PentAiA web application stopped")
 
 
-def create_app(config: WebAppConfig | None = None) -> FastAPI:
+def create_app(
+    config: WebAppConfig | None = None,
+    *,
+    session_store: SessionStore | None = None,
+) -> FastAPI:
     """Build the Phase 4 web application.
 
     A factory rather than a module-level application object, so importing this
     package has no startup side effects and tests can build an application with
     explicit configuration. When no configuration is supplied it is loaded from the
     environment and validated before anything is served.
+
+    ``session_store`` is the seam P4-09 uses to replace the process-local store with a
+    durable repository, and it lets tests create sessions without going through a login
+    route that does not exist yet.
     """
     resolved = config if config is not None else load_webapp_config()
 
@@ -78,6 +87,9 @@ def create_app(config: WebAppConfig | None = None) -> FastAPI:
     )
 
     app.state.config = resolved
+    app.state.session_store = (
+        session_store if session_store is not None else InMemorySessionStore()
+    )
 
     for router in API_ROUTERS:
         app.include_router(router)

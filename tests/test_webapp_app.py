@@ -92,24 +92,32 @@ def test_healthz_exposes_no_sensitive_information(client: TestClient) -> None:
     assert not [token for token in FORBIDDEN_IN_RESPONSE if token in body]
 
 
-def test_the_only_routes_are_the_p4_02_foundation() -> None:
+def test_the_browser_api_surface_is_exactly_the_reviewed_set() -> None:
     """No execution-shaped route may appear on the browser surface.
 
-    Reading the OpenAPI document is version-tolerant and fails loudly if a later
-    change registers a route P4-02 did not intend.
+    Reading the OpenAPI document is version-tolerant and fails loudly if a later change
+    registers a route that was not reviewed. P4-02 asserted the two routes it created;
+    P4-04 deliberately adds the authenticated identity and logout routes, so the
+    expected set is updated rather than the assertion removed.
     """
     app = create_app(WebAppConfig(docs_enabled=True))
 
     with TestClient(app) as client:
         spec = client.get("/openapi.json").json()
 
-    assert set(spec["paths"]) == {"/healthz", "/api/status"}
+    assert set(spec["paths"]) == {
+        "/healthz",
+        "/api/status",
+        "/api/me",
+        "/api/auth/logout",
+    }
 
     for path, operations in spec["paths"].items():
-        assert set(operations) == {"get"}, path
+        assert set(operations) <= {"get", "post"}, path
 
         for operation in operations.values():
-            # No route may accept any client-supplied value at this stage.
+            # No route may accept any client-supplied value at this stage. Login, which
+            # will accept credentials, belongs to P4-05/P4-06.
             assert operation.get("parameters", []) == []
             assert "requestBody" not in operation
 

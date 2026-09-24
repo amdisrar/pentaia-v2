@@ -1,28 +1,92 @@
-"""Authentication boundary seam for the browser-facing API.
+"""Session resolution for the browser-facing API.
 
-P4-02 does not implement authentication, and deliberately does not imitate one. The
-architecture places ``/api/status`` on the authenticated surface and makes identity
-server-owned, so the foundation fails closed instead of serving operational status to
-an unauthenticated caller.
+P4-02 shipped a placeholder here that refused every request, because there was no way
+to resolve an identity at all. This module now resolves identity from the authoritative
+server-side session record. The router-level dependency name is unchanged, so every
+route that was protected before is still protected and the upgrade stays a single
+dependency swap.
 
-This module exists so that opening the authenticated surface in P4-04/P4-08 is a
-dependency swap in one place rather than a rewrite of the routes. There are no
-credentials to check, no session store, and no request shape that can satisfy it.
+Identity is never taken from the request. The only browser input consulted is the
+session cookie, and the cookie is only a pointer: the identity it resolves to comes
+from the session record. Headers, query parameters and bodies carrying a user id, a
+username or an auth source are ignored entirely, so there is no way for a client to
+assert who it is. Phase 4 has no trusted-proxy identity model, and this module does not
+introduce one.
+
+Raw session identifiers are treated as bearer credentials: they are read into a local
+variable, handed to the store for digest lookup, and never logged, echoed or returned.
 """
 
-from typing import NoReturn
+import logging
+from typing import Annotated
 
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
+
+from pentaia.webapp.identity import AuthenticatedIdentity
+from pentaia.webapp.sessions import SESSION_COOKIE_NAME, SessionStore, WebSession
+
+logger = logging.getLogger(__name__)
+
+AUTHENTICATION_REQUIRED_DETAIL = "Authentication required."
 
 
-def require_authenticated_identity() -> NoReturn:
-    """Refuse every request until a real identity provider exists.
+def session_store(request: Request) -> SessionStore:
+    """Return the application's session store.
 
-    P4-04 replaces this with a dependency that resolves the server-side web session
-    and returns the authenticated identity. Until then every route that depends on it
-    answers 401, so no authenticated route is reachable from the browser.
+    A missing store is a wiring fault, not an unauthenticated request, so it surfaces
+    as a server error rather than being mistaken for "no session". Failing closed
+    either way: no request reaches a protected route.
     """
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication is not available yet.",
-    )
+    store = getattr(request.app.state, "session_store", None)
+
+    if store is None:
+        raise RuntimeError(
+            "The web application has no session store configured; build it with "
+            "create_app()."
+        )
+
+    return store
+
+
+def resolve_session(request: Request) -> WebSession | None:
+    """Resolve the caller's session, or ``None`` when there is not a valid one.
+
+    Absent, unknown, invalid and expired sessions are indistinguishable to the caller
+    and all yield ``None``.
+    """
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+
+    if not session_id:
+        return None
+
+    return session_store(request).resolve(session_id)
+
+
+def require_authenticated_session(
+    request: Request,
+) -> WebSession:
+    """Dependency: return the caller's live session, or refuse with 401.
+
+    Routes that need the safe session label (accounting correlation, session
+    visibility) depend on this. The returned record holds no session identifier.
+    """
+    session = resolve_session(request)
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AUTHENTICATION_REQUIRED_DETAIL,
+        )
+
+    return session
+
+
+def require_authenticated_identity(
+    session: Annotated[WebSession, Depends(require_authenticated_session)],
+) -> AuthenticatedIdentity:
+    """Dependency: return the authenticated identity, or refuse with 401.
+
+    Keeps the name P4-02 introduced, so the routes that were already protected by it
+    keep working unchanged.
+    """
+    return session.identity
