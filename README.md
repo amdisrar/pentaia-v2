@@ -98,6 +98,16 @@ src/pentaia/
   session_cli.py         `pentaia session list|show|attach|close`
 ```
 
+Design documents live in `docs/`:
+
+| Document | Document ID | Written by |
+| --- | --- | --- |
+| `phase4-architecture.md` | PENTAIA-ARCH-P4-01 | PentAiA project / AI-assisted draft |
+| `phase4-arch-dsh.md` | PENTAIA-ARCH-P4-DSH-01 | DSH (DeepSeek Harness) |
+
+Both address Phase 4 (issue #51) as independent architecture drafts for the web GUI,
+identity, accounting and break-glass CLI. No Phase 4 code exists yet.
+
 ## Configuration
 
 Copy the keys you need into `.env` (loaded automatically):
