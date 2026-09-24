@@ -155,8 +155,11 @@ def test_interactive_documentation_can_be_enabled_explicitly() -> None:
 
 
 def test_unknown_routes_are_not_found(client: TestClient) -> None:
+    # P4-02 originally asserted that "/" was 404. P4-03 deliberately serves the GUI
+    # shell there, so "/" is no longer an unknown path and a genuinely unknown path is
+    # used instead. The GUI route is asserted in tests/test_webapp_gui.py.
     assert client.get("/api/does-not-exist").status_code == 404
-    assert client.get("/").status_code == 404
+    assert client.get("/console").status_code == 404
 
 
 def test_the_module_entry_point_is_importable_and_runnable() -> None:

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PentAiA</title>
+    <!--
+      P4-03 GUI shell.
+
+      This file is served verbatim as a static asset. There is no server-side
+      templating and no injected configuration anywhere in the shell, so backend
+      settings cannot leak into the page even by accident, and no inline script or
+      style is used so a strict Content-Security-Policy stays a drop-in later.
+
+      Every value that could ever carry conversation, approval or status text is
+      rendered through textContent in js/app.js, never as markup.
+    -->
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <!-- Unauthenticated state ------------------------------------------------->
+    <section id="login-view" class="view login" data-view="login" aria-labelledby="login-heading">
+      <div class="card login-card">
+        <h1 id="login-heading">PentAiA</h1>
+        <p class="muted">AI-assisted penetration testing for explicitly authorized lab systems.</p>
+
+        <div class="notice" data-tone="warning" id="login-notice">
+          <strong>Authentication is not implemented yet.</strong>
+          <p>
+            Enterprise sign-in (Active Directory and RADIUS) arrives in P4-04 to P4-07.
+            This build has no credential entry, no session and no signed-in user.
+          </p>
+        </div>
+
+        <button id="preview-shell" type="button" class="primary">Preview the application shell</button>
+        <p class="muted small">
+          Preview opens the interface without authenticating anyone and shows no
+          operational data. It is a layout preview, not a sign-in.
+        </p>
+      </div>
+    </section>
+
+    <!-- Application shell ----------------------------------------------------->
+    <div id="app-view" class="app" data-view="app" hidden>
+      <header id="app-header">
+        <div class="header-left">
+          <span class="brand">PentAiA</span>
+          <span id="preview-badge" class="badge" data-tone="warning" hidden>
+            Preview &mdash; not authenticated
+          </span>
+        </div>
+
+        <div id="session-area">
+          <span id="session-identity" class="muted small">Not signed in</span>
+          <button id="exit-preview" type="button" class="ghost" hidden>Exit preview</button>
+          <button
+            id="logout-button"
+            type="button"
+            class="ghost"
+            disabled
+            title="Sign-out arrives with authentication in P4-04"
+          >
+            Log out
+          </button>
+        </div>
+      </header>
+
+      <nav id="app-nav" aria-label="Main">
+        <a href="#conversations" data-nav="conversations">Conversations</a>
+        <a href="#accounting" data-nav="accounting">Accounting</a>
+        <a href="#status" data-nav="status">System status</a>
+      </nav>
+
+      <main id="main">
+        <!-- Conversation workspace (integration point for P4-11) -------------->
+        <section
+          id="conversations-view"
+          class="view"
+          data-view="conversations"
+          aria-labelledby="conversations-heading"
+        >
+          <h2 id="conversations-heading">Conversations</h2>
+
+          <div id="durability-warning" class="notice" data-tone="warning">
+            <strong>Conversations are not stored across a restart.</strong>
+            <p>
+              Phase 4 keeps agent conversation state in memory only, so restarting the
+              application may make a conversation unavailable. Durable memory is Phase 5
+              work.
+            </p>
+          </div>
+
+          <div class="workspace">
+            <aside id="conversation-sidebar" aria-labelledby="conversation-list-heading">
+              <h3 id="conversation-list-heading">Your conversations</h3>
+              <button id="new-conversation" type="button" disabled>New conversation</button>
+              <ul id="conversation-list"></ul>
+              <p id="conversation-list-empty" class="muted small">
+                No conversations. Conversation storage and listing arrive in P4-11.
+              </p>
+            </aside>
+
+            <div id="conversation-view">
+              <h3 id="conversation-title">No conversation selected</h3>
+
+              <div id="message-list" role="log" aria-live="polite" aria-label="Conversation messages"></div>
+
+              <form id="message-form">
+                <label class="visually-hidden" for="message-input">Message</label>
+                <textarea
+                  id="message-input"
+                  rows="3"
+                  placeholder="Ask PentAiA to examine an authorized target&hellip;"
+                  disabled
+                ></textarea>
+                <div class="composer-actions">
+                  <button id="send-button" type="submit" disabled>Send</button>
+                </div>
+              </form>
+              <p id="message-input-note" class="muted small">
+                Sending is disabled. Agent execution is integrated in P4-11 and approval
+                decisions in P4-12.
+              </p>
+
+              <!-- Turn / busy state -->
+              <div id="turn-status" data-state="idle" role="status" aria-live="polite">
+                <span id="turn-status-label">Idle</span>
+                <span id="turn-status-detail" class="muted small"></span>
+              </div>
+
+              <!-- Reserved approval panel (P4-12). No approval is executed here. -->
+              <section id="approval-panel" hidden aria-labelledby="approval-heading">
+                <h3 id="approval-heading">Approval required</h3>
+                <p class="muted small">
+                  The exact server-owned proposal is shown below. Approve and Reject are
+                  decided server-side against the proposal signature.
+                </p>
+                <dl id="approval-details">
+                  <dt>Target</dt>
+                  <dd id="approval-target"></dd>
+                  <dt>Action</dt>
+                  <dd id="approval-action"></dd>
+                  <dt>Rationale</dt>
+                  <dd id="approval-rationale"></dd>
+                  <dt>Expected effect</dt>
+                  <dd id="approval-expected-effect"></dd>
+                  <dt>Parameters</dt>
+                  <dd id="approval-parameters"></dd>
+                </dl>
+                <div class="approval-actions">
+                  <button id="approval-approve" type="button" disabled>Approve</button>
+                  <button id="approval-reject" type="button" class="ghost" disabled>Reject</button>
+                </div>
+                <p id="approval-note" class="muted small">
+                  Approve and Reject are disabled: this build cannot execute an approval.
+                  P4-12 connects them to the existing signed-approval workflow.
+                </p>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <!-- Accounting / audit placeholder (P4-10) ---------------------------->
+        <section
+          id="accounting-view"
+          class="view"
+          data-view="accounting"
+          hidden
+          aria-labelledby="accounting-heading"
+        >
+          <h2 id="accounting-heading">Accounting</h2>
+          <div class="notice">
+            <strong>The accounting viewer arrives in P4-10.</strong>
+            <p>No events are queried yet, and this table is a layout placeholder.</p>
+          </div>
+          <table id="accounting-table">
+            <caption class="visually-hidden">Accounting events</caption>
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">User</th>
+                <th scope="col">Event</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody id="accounting-rows"></tbody>
+          </table>
+        </section>
+
+        <!-- System status ----------------------------------------------------->
+        <section
+          id="status-view"
+          class="view"
+          data-view="status"
+          hidden
+          aria-labelledby="status-heading"
+        >
+          <h2 id="status-heading">System status</h2>
+          <p class="muted small">
+            Only safe, non-sensitive status is shown. Credentials, configuration and
+            internal details are never rendered.
+          </p>
+
+          <ul id="status-list">
+            <li>
+              Application liveness (<code>/healthz</code>):
+              <span id="status-healthz" data-state="unknown">checking&hellip;</span>
+            </li>
+            <li>
+              Authenticated status (<code>/api/status</code>):
+              <span id="status-api" data-state="unknown">checking&hellip;</span>
+            </li>
+          </ul>
+
+          <button id="refresh-status" type="button">Refresh</button>
+          <p id="status-note" class="muted small"></p>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/js/app.js" defer></script>
+  </body>
+</html>

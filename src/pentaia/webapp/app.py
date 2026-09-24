@@ -26,6 +26,7 @@ from fastapi import FastAPI
 
 from pentaia.webapp.api import API_ROUTERS
 from pentaia.webapp.config import WebAppConfig, load_webapp_config
+from pentaia.webapp.gui import mount_gui
 
 logger = logging.getLogger(__name__)
 
@@ -80,5 +81,7 @@ def create_app(config: WebAppConfig | None = None) -> FastAPI:
 
     for router in API_ROUTERS:
         app.include_router(router)
+
+    mount_gui(app)
 
     return app
