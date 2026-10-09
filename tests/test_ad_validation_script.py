@@ -4,7 +4,7 @@ These tests are offline and deterministic: the provider is replaced at the scrip
 single ``build_provider`` seam, so no socket, directory or credential is involved.
 
 **They are not the real LDAPS validation.** Only running the scenarios against a real
-Microsoft Entra Domain Services endpoint constitutes that.
+Active Directory domain controller over LDAPS constitutes that.
 """
 
 import argparse

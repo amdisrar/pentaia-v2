@@ -10,6 +10,10 @@ venv/
 # Environment variables / secrets
 .env
 
+# Local laboratory artifacts: LDAPS certificates, CA bundles and other material
+# kept on the development host and never committed.
+.local/
+
 # IDE
 .vscode/
 .idea/

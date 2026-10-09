@@ -12,7 +12,8 @@ exit codes. It prompts for a UPN and a password and reports the normalized outco
     uv run python scripts/ad_ldaps_check.py --expect rejected     # assert the outcome
 
 **Scenario mode** runs one named check with a fixed expectation and a PASS/FAIL
-verdict. This is what the Microsoft Entra Domain Services validation uses::
+verdict. This is the validation path used against a real Active Directory domain
+controller over LDAPS::
 
     S1  success         real UPN + real password                 -> SUCCESS
     S2  wrong-password  real UPN + an in-process wrong password   -> REJECTED
@@ -255,8 +256,8 @@ def run_success(config: ADConfig, username: str) -> int:
 
 def run_wrong_password(config: ADConfig, username: str) -> int:
     """S2: a deliberately wrong password must be refused. Nothing is prompted."""
-    print("note    : one failed sign-in is sent. Entra Domain Services locks an account")
-    print("          after repeated failures, so run this once.\n")
+    print("note    : one failed sign-in is sent. An Active Directory account-lockout")
+    print("          policy locks the account after repeated failures, so run this once.\n")
 
     result = build_provider(config).authenticate(username, generate_wrong_password())
 
@@ -271,8 +272,8 @@ def run_wrong_password(config: ADConfig, username: str) -> int:
 
 def run_roundtrip(config: ADConfig, username: str) -> int:
     """S3: the same UPN succeeds with the real password and fails without it."""
-    print("note    : one failed sign-in is sent. Entra Domain Services locks an account")
-    print("          after repeated failures, so run this once.\n")
+    print("note    : one failed sign-in is sent. An Active Directory account-lockout")
+    print("          policy locks the account after repeated failures, so run this once.\n")
 
     provider = build_provider(config)
     password = read_password()
