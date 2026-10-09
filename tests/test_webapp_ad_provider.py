@@ -453,6 +453,34 @@ def test_the_transport_is_ldaps_only_with_bounded_timeouts(recorded_transport) -
     assert server.kwargs["tls"].validate == ssl.CERT_REQUIRED
     assert connection.kwargs["receive_timeout"] == 4
 
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout"),
+    [
+        (5.0, 5),
+        (5.5, 6),
+        (0.5, 1),
+        (10.0, 10),
+    ],
+)
+def test_ldap3_receives_integer_timeout(
+    recorded_transport,
+    configured_timeout,
+    expected_timeout,
+) -> None:
+    """ldap3 requires an integer receive timeout on Linux."""
+    config = ADConfig(
+        host=HOST,
+        receive_timeout=configured_timeout,
+    )
+
+    binder = Ldap3DirectoryBinder(config)
+    binder.bind(username=NORMALIZED, password=PASSWORD)
+
+    connection = RecordingConnection.instances[-1]
+
+    assert isinstance(connection.kwargs["receive_timeout"], int)
+    assert connection.kwargs["receive_timeout"] == expected_timeout
+
 
 def test_the_transport_performs_no_directory_read(recorded_transport) -> None:
     """A direct bind needs no search, and ldap3 would otherwise read the schema."""

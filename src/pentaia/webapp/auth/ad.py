@@ -35,6 +35,7 @@ usable exception taxonomy. All library-specific handling is confined to
 """
 
 import logging
+import math
 import os
 import ssl
 from collections.abc import Mapping
@@ -394,7 +395,7 @@ class Ldap3DirectoryBinder:
             # Never follow a referral to a host the operator did not configure.
             auto_referrals=False,
             raise_exceptions=True,
-            receive_timeout=config.receive_timeout,
+            receive_timeout=math.ceil(config.receive_timeout),
         )
 
         try:
