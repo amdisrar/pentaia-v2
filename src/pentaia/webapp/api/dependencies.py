@@ -22,12 +22,25 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 
+from pentaia.webapp.auth.base import AuthProvider
 from pentaia.webapp.identity import AuthenticatedIdentity
 from pentaia.webapp.sessions import SESSION_COOKIE_NAME, SessionStore, WebSession
 
 logger = logging.getLogger(__name__)
 
 AUTHENTICATION_REQUIRED_DETAIL = "Authentication required."
+
+
+def authentication_provider(request: Request) -> AuthProvider | None:
+    """Return the deployment's active authentication provider, if it has one.
+
+    An application built without a configured provider is a valid deployment, so a
+    missing provider is reported as ``None`` rather than raising. Nothing here creates
+    a provider on demand: selection happens once, before the server binds, and this
+    only reads the result. The absence of a provider is therefore never mistaken for
+    an authentication success.
+    """
+    return getattr(request.app.state, "auth_provider", None)
 
 
 def session_store(request: Request) -> SessionStore:

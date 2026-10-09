@@ -15,10 +15,14 @@ The safe payload shape is defined now so later issues fill it in instead of inve
 it, and so the "no secrets in status" rule has one place to live.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from pentaia.webapp.api.dependencies import require_authenticated_identity
+from pentaia.webapp.api.dependencies import (
+    authentication_provider,
+    require_authenticated_identity,
+)
+from pentaia.webapp.auth.base import AuthProvider
 
 router = APIRouter(
     prefix="/api",
@@ -37,27 +41,43 @@ class StatusResponse(BaseModel):
     session secrets, identity-provider secrets, Kali host details, and target
     information. Operational facts such as provider reachability belong here only
     once the corresponding component exists.
+
+    ``authentication_provider`` is the canonical token of the active provider
+    (``"ad"``), or ``None`` when the deployment selected none. ``authentication_ready``
+    says whether this process can authenticate anyone at all, so liveness and the
+    ability to authenticate are never conflated: a deployment with no provider answers
+    ``/healthz`` and reports ``authentication_provider: null`` here.
+
+    Readiness is a *construction* fact, not a reachability check. The identity source
+    is contacted when a credential is verified (P4-08), not while the application
+    starts, so ``authentication_ready`` does not promise the directory is up.
     """
 
     application: str = APPLICATION_NAME
     authentication_provider: str | None = None
+    authentication_ready: bool = False
 
 
-def build_status_payload() -> StatusResponse:
+def build_status_payload(auth_provider: AuthProvider | None = None) -> StatusResponse:
     """Build the current safe status payload.
 
-    P4-02 has no authentication provider and no accounting store, so the only honest
-    values are the application name and an absent provider. Later issues extend this
-    function; they must keep the result free of secrets.
+    Both authentication fields are derived from the one active provider object, so
+    they cannot disagree: the provider that exists *is* the provider that is named.
+
+    P4-02 had no provider to report. Later issues extend this function; they must keep
+    the result free of secrets.
     """
-    return StatusResponse()
+    return StatusResponse(
+        authentication_provider=None if auth_provider is None else auth_provider.name,
+        authentication_ready=auth_provider is not None,
+    )
 
 
 @router.get("/status", response_model=StatusResponse)
-async def status_endpoint() -> StatusResponse:
+async def status_endpoint(request: Request) -> StatusResponse:
     """Return safe application status to an authenticated caller.
 
     Unreachable until authentication exists: the router dependency refuses first, by
     design.
     """
-    return build_status_payload()
+    return build_status_payload(authentication_provider(request))

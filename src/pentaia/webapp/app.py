@@ -1,8 +1,8 @@
 """FastAPI application factory for the Phase 4 web layer.
 
-P4-02 establishes the application boundary and nothing behind it. There is no
-authentication, no session store, no accounting store and no conversation service
-yet; those arrive in P4-04/P4-08, P4-09 and P4-11.
+P4-02 establishes the application boundary and nothing behind it. Authentication is
+now selected here (P4-07) but there is still no login route, no accounting store and
+no conversation service; those arrive in P4-08, P4-09 and P4-11.
 
 The boundary this package exists to enforce:
 
@@ -25,6 +25,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from pentaia.webapp.api import API_ROUTERS
+from pentaia.webapp.auth.base import AuthProvider
+from pentaia.webapp.auth.selection import build_auth_provider
 from pentaia.webapp.config import WebAppConfig, load_webapp_config
 from pentaia.webapp.gui import mount_gui
 from pentaia.webapp.sessions import InMemorySessionStore, SessionStore
@@ -39,17 +41,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Own the application lifecycle.
 
     Startup does only what the foundation needs: the configuration has already been
-    validated before the server binds, and the resolved settings are logged so a
-    start-up problem is visible. There is deliberately no database, identity provider
-    or connection pool to open yet, and shutdown has nothing to release.
+    validated and the authentication provider already built before the server binds,
+    and the resolved settings are logged so a start-up problem is visible. There is
+    deliberately no database or connection pool to open yet, and shutdown has nothing
+    to release.
     """
     config: WebAppConfig = app.state.config
+    provider: AuthProvider | None = app.state.auth_provider
 
     logger.info(
-        "PentAiA web application starting host=%s port=%s docs_enabled=%s",
+        "PentAiA web application starting host=%s port=%s docs_enabled=%s "
+        "auth_provider=%s",
         config.host,
         config.port,
         config.docs_enabled,
+        provider.name if provider is not None else "none",
     )
 
     try:
@@ -62,6 +68,7 @@ def create_app(
     config: WebAppConfig | None = None,
     *,
     session_store: SessionStore | None = None,
+    auth_provider: AuthProvider | None = None,
 ) -> FastAPI:
     """Build the Phase 4 web application.
 
@@ -73,8 +80,22 @@ def create_app(
     ``session_store`` is the seam P4-09 uses to replace the process-local store with a
     durable repository, and it lets tests create sessions without going through a login
     route that does not exist yet.
+
+    ``auth_provider`` is the matching seam for authentication: an explicitly supplied
+    provider is used as-is and no provider is built from the configuration. Otherwise
+    the configured provider is built *here*, before the server binds, so an unusable
+    selection stops the application instead of failing on someone's first login. When
+    neither is present the application runs with no provider at all: nothing can
+    authenticate, which is not the same as anyone being allowed in.
     """
     resolved = config if config is not None else load_webapp_config()
+
+    provider = auth_provider
+
+    if provider is None and resolved.auth_provider is not None:
+        # Fails closed: an unimplemented or unusable selection raises out of this
+        # factory rather than degrading to a different authentication mechanism.
+        provider = build_auth_provider(resolved.auth_provider)
 
     app = FastAPI(
         title=APPLICATION_TITLE,
@@ -90,6 +111,7 @@ def create_app(
     app.state.session_store = (
         session_store if session_store is not None else InMemorySessionStore()
     )
+    app.state.auth_provider = provider
 
     for router in API_ROUTERS:
         app.include_router(router)

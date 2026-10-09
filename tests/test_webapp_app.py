@@ -144,9 +144,16 @@ def test_the_safe_status_payload_is_typed_and_secret_free() -> None:
 
     assert payload.application == "pentaia"
     assert payload.authentication_provider is None
+    assert payload.authentication_ready is False
     # Pinning the field set is the point: a secret-bearing field cannot be added
-    # without this test failing and the addition being reviewed deliberately.
-    assert set(payload.model_dump()) == {"application", "authentication_provider"}
+    # without this test failing and the addition being reviewed deliberately. P4-07
+    # adds the two authentication fields, so the set is updated rather than the
+    # assertion removed.
+    assert set(payload.model_dump()) == {
+        "application",
+        "authentication_provider",
+        "authentication_ready",
+    }
 
 
 def test_interactive_documentation_is_disabled_by_default(client: TestClient) -> None:

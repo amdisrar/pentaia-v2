@@ -1,9 +1,10 @@
 """Typed configuration for the Phase 4 web application.
 
-This is a foundation, not the full Phase 4 configuration surface. P4-02 needs enough
-to start the application and reach its liveness endpoint; later issues add their own
-settings (authentication provider selection in P4-07, the SQLite data directory in
-P4-09). Guessing at those now would put unused, untested settings into the contract.
+This is not the full Phase 4 configuration surface. P4-02 needed enough to start the
+application and reach its liveness endpoint; P4-07 adds authentication-provider
+selection. Later issues add their own settings (the SQLite data directory in P4-09,
+session timeouts in P4-08). Guessing at those now would put unused, untested settings
+into the contract.
 
 Only non-sensitive application settings live here. Identity-provider secrets, session
 signing material, SSH credentials and API keys are not read by this module and must
@@ -25,6 +26,7 @@ from dotenv import load_dotenv
 HOST_ENV = "PENTAIA_WEB_HOST"
 PORT_ENV = "PENTAIA_WEB_PORT"
 DOCS_ENV = "PENTAIA_WEB_DOCS"
+AUTH_PROVIDER_ENV = "PENTAIA_AUTH_PROVIDER"
 
 # Loopback by default. The Phase 4 deployment places a reverse proxy on the same
 # host, so the application never needs to listen on a public interface, and a secure
@@ -37,6 +39,12 @@ DEFAULT_PORT = 8000
 # entire browser-facing surface, so documentation is opt-in rather than opt-out.
 DEFAULT_DOCS_ENABLED = False
 
+#: Every authentication backend Phase 4 defines. Both are valid configuration values;
+#: which of them can actually be *built* is decided by
+#: ``pentaia.webapp.auth.selection``, so that RADIUS keeps its place in the contract
+#: while issue #56 is deferred.
+SUPPORTED_AUTH_PROVIDERS = ("ad", "radius")
+
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -48,6 +56,10 @@ class WebAppConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     docs_enabled: bool = DEFAULT_DOCS_ENABLED
+    #: Selected authentication backend, or ``None`` when the deployment has not chosen
+    #: one. ``None`` means no provider is constructed and nobody can authenticate; it
+    #: never means anonymous access.
+    auth_provider: str | None = None
 
 
 def validate_web_host(value: object) -> str:
@@ -120,6 +132,52 @@ def validate_docs_enabled(value: object) -> bool:
     raise ValueError(f"{DOCS_ENV} must be one of: {allowed}.")
 
 
+def _is_provider_setting(value: object) -> bool:
+    """True only for a string setting, which is all an environment can supply.
+
+    Exists so the type check reads as a value check: a wrong type is reported the same
+    way as any other invalid setting, as ``ValueError`` naming the variable, which is
+    what every validator in ``pentaia.runtime_config`` does.
+    """
+    return isinstance(value, str)
+
+
+def validate_auth_provider(value: object) -> str | None:
+    """Validate the selected authentication backend.
+
+    Both Phase 4 providers are accepted as configuration values. Whether the selected
+    one can actually be constructed is decided by
+    ``pentaia.webapp.auth.selection``; this function only rejects values that are not
+    providers at all, so an unknown name fails at startup instead of being silently
+    ignored.
+
+    Absent or blank means no provider is configured, which is a valid state: the
+    application starts, but nothing can authenticate. Blank is treated as unset rather
+    than rejected because leaving the setting empty is the documented way to run the
+    web application without authentication during development.
+    """
+    if value is None:
+        return None
+
+    if not _is_provider_setting(value):
+        raise ValueError(
+            f"{AUTH_PROVIDER_ENV} must be one of: {', '.join(SUPPORTED_AUTH_PROVIDERS)}."
+        )
+
+    candidate = value.strip().lower()
+
+    if not candidate:
+        return None
+
+    if candidate not in SUPPORTED_AUTH_PROVIDERS:
+        raise ValueError(
+            f"{AUTH_PROVIDER_ENV} must be one of: "
+            f"{', '.join(SUPPORTED_AUTH_PROVIDERS)} (got {candidate!r})."
+        )
+
+    return candidate
+
+
 def _read(environ: Mapping[str, str], name: str, default: str) -> str:
     """Read one setting, defaulting only when it is genuinely absent.
 
@@ -147,5 +205,11 @@ def load_webapp_config(environ: Mapping[str, str] | None = None) -> WebAppConfig
     host = validate_web_host(_read(environ, HOST_ENV, DEFAULT_HOST))
     port = validate_web_port(_read(environ, PORT_ENV, str(DEFAULT_PORT)))
     docs_enabled = validate_docs_enabled(_read(environ, DOCS_ENV, "false"))
+    auth_provider = validate_auth_provider(_read(environ, AUTH_PROVIDER_ENV, ""))
 
-    return WebAppConfig(host=host, port=port, docs_enabled=docs_enabled)
+    return WebAppConfig(
+        host=host,
+        port=port,
+        docs_enabled=docs_enabled,
+        auth_provider=auth_provider,
+    )

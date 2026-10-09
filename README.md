@@ -206,11 +206,47 @@ Copy the keys you need into `.env` (loaded automatically):
 | `PENTAIA_NUCLEI_DENYLIST` | Nuclei template denylist |
 | `PENTAIA_WEB_HOST`, `PENTAIA_WEB_PORT` | web application bind address (default `127.0.0.1:8000`) |
 | `PENTAIA_WEB_DOCS` | enable `/docs` (default false) |
+| `PENTAIA_AUTH_PROVIDER` | identity provider for the web application: `ad` or `radius`, blank for none |
 | `PENTAIA_AD_HOST` | Active Directory domain controller, bare host (required for AD) |
 | `PENTAIA_AD_PORT` | LDAPS port, default `636` |
 | `PENTAIA_AD_CA_FILE` | optional private CA bundle for LDAPS |
 | `PENTAIA_AD_CONNECT_TIMEOUT` | LDAPS connect timeout in seconds, default `5` |
 | `PENTAIA_AD_RECEIVE_TIMEOUT` | LDAPS read timeout in seconds, default `5` |
+
+### Authentication provider selection
+
+`PENTAIA_AUTH_PROVIDER` chooses the one identity provider a deployment authenticates
+against. Phase 4 defines two:
+
+| Value | State |
+| --- | --- |
+| `ad` | Active Directory over LDAPS, implemented and described below |
+| `radius` | part of the Phase 4 contract, not implemented yet (issue #56) |
+
+Leaving the setting unset, or blank, is valid and means **no provider**. The
+application starts and `/healthz` answers, but nothing can authenticate: every `/api`
+route refuses. That is not anonymous access, and it never becomes one.
+
+Selection is validated and the provider is built **before the server binds**, so a
+deployment cannot come up in a state it cannot honour:
+
+- an unrecognised value (`ldap`, `ad,radius`, …) fails startup and names the variable;
+- `radius` fails startup, naming issue #56 and the provider that is available instead;
+- invalid provider settings (missing `PENTAIA_AD_HOST`, unusable CA bundle, …) fail
+  startup as they already did.
+
+There is **no fallback**. A configured provider is either built or the application
+refuses to start, and a provider that fails is never replaced by another mechanism.
+
+The active provider is visible to an authenticated operator on `/api/status` as
+`authentication_provider` (`"ad"`, or `null` when none is selected) alongside
+`authentication_ready`. Readiness is a construction fact, not a reachability check: the
+directory is contacted when a credential is verified, not while the application starts.
+
+`GET /healthz` stays a liveness probe and never reports on authentication. The login
+route that turns a successful bind into a session is P4-08; until it exists no
+browser-reachable path can create a credential, which is why every `/api` route answers
+`401` today.
 
 ### Active Directory (LDAPS) authentication
 
@@ -245,9 +281,10 @@ Authentication outcomes are normalized to `SUCCESS`, `REJECTED`, `UNAVAILABLE` o
 credential and an unknown user are indistinguishable to a caller. Passwords are used for
 one bind and never stored, logged, returned or placed in session state.
 
-Provider selection (`PENTAIA_AUTH_PROVIDER=ad|radius`) and the login route are **not**
-part of this provider: they arrive with P4-07 and the login flow. The provider is
-therefore exercised through its own interface today.
+Provider selection (`PENTAIA_AUTH_PROVIDER`) is a separate concern, described above:
+this provider knows nothing about which backend a deployment chose. The login route
+that turns a successful bind into a session still does not exist, so the provider is
+exercised through its own interface and through `scripts/ad_ldaps_check.py` today.
 
 #### Optional real-Active-Directory validation
 
