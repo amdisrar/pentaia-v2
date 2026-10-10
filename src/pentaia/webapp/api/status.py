@@ -21,13 +21,16 @@ from pydantic import BaseModel
 from pentaia.webapp.api.dependencies import (
     authentication_provider,
     require_authenticated_identity,
+    require_csrf,
 )
 from pentaia.webapp.auth.base import AuthProvider
 
 router = APIRouter(
     prefix="/api",
     tags=["status"],
-    dependencies=[Depends(require_authenticated_identity)],
+    # CSRF enforcement is mounted here rather than per route, and driven by the request
+    # method, so a future state-changing route on this router is covered by default.
+    dependencies=[Depends(require_authenticated_identity), Depends(require_csrf)],
 )
 
 APPLICATION_NAME = "pentaia"

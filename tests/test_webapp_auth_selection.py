@@ -28,6 +28,7 @@ from pentaia.webapp.auth.base import (
     ProviderMisconfigured,
     ProviderUnavailable,
 )
+from pentaia.webapp.auth.csrf import CSRF_HEADER_NAME
 from pentaia.webapp.config import (
     AUTH_PROVIDER_ENV,
     SUPPORTED_AUTH_PROVIDERS,
@@ -364,14 +365,18 @@ def test_no_provider_mode_cannot_reach_the_protected_surface() -> None:
     app = create_app(WebAppConfig(docs_enabled=True))
 
     with TestClient(app) as client:
-        spec = client.get("/openapi.json").json()
+        # Login exists from P4-08, and in a deployment with no provider it authenticates
+        # nobody: the same failure a caller would get from a provider it cannot reach,
+        # and never a session.
+        token = client.get("/api/auth/csrf").json()["csrf_token"]
+        refused = client.post(
+            "/api/auth/login",
+            json={"username": "admin@example.test", "password": "whatever"},
+            headers={CSRF_HEADER_NAME: token},
+        )
 
-        # Nothing exists that could issue a credential in the first place.
-        assert not [
-            path
-            for path in spec["paths"]
-            if "login" in path or "token" in path or "session" in path
-        ]
+        assert refused.status_code == 503
+        assert SESSION_COOKIE_NAME not in refused.headers.get("set-cookie", "")
 
         # A forged session cookie is a bearer credential the store has never seen.
         client.cookies.set(SESSION_COOKIE_NAME, "sess-forged")

@@ -207,6 +207,13 @@ Copy the keys you need into `.env` (loaded automatically):
 | `PENTAIA_WEB_HOST`, `PENTAIA_WEB_PORT` | web application bind address (default `127.0.0.1:8000`) |
 | `PENTAIA_WEB_DOCS` | enable `/docs` (default false) |
 | `PENTAIA_AUTH_PROVIDER` | identity provider for the web application: `ad` or `radius`, blank for none |
+| `PENTAIA_SESSION_IDLE_TIMEOUT` | idle session timeout in seconds, default `1800` |
+| `PENTAIA_SESSION_ABSOLUTE_LIFETIME` | absolute session lifetime in seconds, default `43200` (never extended) |
+| `PENTAIA_PUBLIC_ORIGIN` | origin this deployment is reachable at, e.g. `https://pentaia.example.test` |
+| `PENTAIA_TRUSTED_PROXIES` | peers whose `X-Forwarded-For` is believed, default `127.0.0.1` |
+| `PENTAIA_LOGIN_MAX_ATTEMPTS` | failed logins per username/address pair, default `5` |
+| `PENTAIA_LOGIN_WINDOW_SECONDS` | throttling window in seconds, default `900` |
+| `PENTAIA_LOGIN_MAX_KEYS` | upper bound on throttling state, default `10000` |
 | `PENTAIA_AD_HOST` | Active Directory domain controller, bare host (required for AD) |
 | `PENTAIA_AD_PORT` | LDAPS port, default `636` |
 | `PENTAIA_AD_CA_FILE` | optional private CA bundle for LDAPS |
@@ -244,9 +251,97 @@ The active provider is visible to an authenticated operator on `/api/status` as
 directory is contacted when a credential is verified, not while the application starts.
 
 `GET /healthz` stays a liveness probe and never reports on authentication. The login
-route that turns a successful bind into a session is P4-08; until it exists no
-browser-reachable path can create a credential, which is why every `/api` route answers
-`401` today.
+route that turns a successful bind into a session is described under *Web sessions and
+login* below.
+
+### Web sessions and login
+
+`POST /api/auth/login` accepts a JSON body containing only `username` and `password`,
+authenticates them with the selected provider, and on success starts a server-side
+session. There is no provider parameter, no role and no target in the request: a
+browser cannot influence which backend authenticates it or what it is allowed to do.
+
+Every other answer is deliberately uniform:
+
+| Situation | Answer |
+| --- | --- |
+| Wrong password, unknown username | `401` with one fixed message |
+| Provider unreachable, misconfigured, or none configured | `503` with one fixed message |
+| Too many failures | `429` with `Retry-After` |
+
+The two failure classes exist so an operator can tell a rejection from an outage; within
+a class the response is byte-identical, so it can never be used to discover whether an
+account exists, and no directory error, credential or username is ever echoed.
+
+**Sessions.** After a successful login the browser holds a 256-bit opaque identifier in
+an `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/` cookie with no `Domain` attribute. The
+authoritative record is server-side, keyed by a SHA-256 digest of that identifier, so
+the raw value is never stored. Records expire after 30 idle minutes (configurable) or 12
+hours absolute (configurable, **never extended by activity**). Logout, expiry and
+administrative invalidation (`invalidate_user`, used by `pentaia-admin` in P4-14) all
+destroy the record, so a captured identifier stops working immediately.
+
+**Fixation.** Login never adopts a client-supplied identifier. Whatever session the
+presented cookie points to is destroyed on success and a new identifier — with a new
+CSRF token — is issued. An identifier an attacker planted before authentication is dead
+the moment the real user signs in. A *failed* login touches no session at all, so a
+wrong password cannot disturb an existing one.
+
+**CSRF.** Two mechanisms, one per state:
+
+- Before authentication the token is **server-bound**: `GET /api/auth/csrf` issues a
+  random 256-bit value and the server keeps a digest of it. `POST /api/auth/login`
+  requires it in the `X-PentAiA-CSRF` header. A page on another origin can neither read
+  the response that carries the token nor set that header, so it cannot force a victim's
+  browser to sign in as somebody else.
+- After authentication the authoritative token is the one inside the session record, and
+  it is required on every state-changing request — including logout. The check is
+  mounted on the routers and driven by the request method, so a future state-changing
+  route cannot be added without it.
+
+Tokens are compared in constant time, and missing, malformed and oversized values are
+refused before any comparison. The browser keeps its token in memory only: never in
+`localStorage`, `sessionStorage`, a cookie or a URL. A page reload loses it and recovers
+it from `GET /api/auth/csrf`, which returns the session's own token.
+
+The pre-authentication token is also bound to the client address it was issued to, so a
+token that leaks by any other route is useless from anywhere else.
+
+**Origin verification.** `PENTAIA_PUBLIC_ORIGIN` declares the origin this deployment is
+reachable at. When it is set, a state-changing request carrying an `Origin` header must
+match it exactly, scheme and port included, and `Sec-Fetch-Site: cross-site` is refused
+outright. Nothing is inferred from `Host` and nothing is read from a forwarded header, so
+a client cannot influence the comparison. With the setting unset only the host is
+compared against the `Host` the request was addressed to — weaker, and visibly logged as
+`public_origin=unset` at startup. In both modes the CSRF token remains the control that
+actually authorises the request; origin checking is defence in depth.
+
+**Login request size.** The one unauthenticated route that accepts a body is bounded by
+the application at 64 KiB. A declared `Content-Length` over the limit is refused before a
+byte is read, and the body is *also* counted as it streams, so omitting the header and
+using chunked encoding does not bypass the bound. Both paths answer with the same generic
+`413`. A proxy-level body limit remains worth configuring as defence in depth.
+
+**Throttling.** Failures are counted per `(username, address)` pair — five in fifteen
+minutes by default — with an aggregate allowance of four times that per address and per
+username. A blocked pair never reaches the directory. Usernames are stored and logged
+only as digests; a malformed or unknown username is counted exactly like a real one, so
+the throttle is not an existence oracle. The state is bounded, and eviction may only
+remove entries that are not currently blocking, so generating new keys cannot flush a
+live lockout away.
+
+**Client address behind the proxy.** The application disables uvicorn's own header
+rewriting and resolves the client address itself. `X-Forwarded-For` is consulted **only**
+when the TCP peer is listed in `PENTAIA_TRUSTED_PROXIES`, and then walked from the right,
+so the address our own proxy appended is the one used and client-supplied entries to its
+left are ignored. Header length and hop count are bounded, and only well-formed IP
+addresses become throttle identities.
+
+> **Deployment requirement.** The reverse proxy must **append** the address it observed
+> (`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`) or **replace** the
+> header with `$remote_addr`. A proxy that passes a client-supplied `X-Forwarded-For`
+> through unchanged hands the client control of its own throttle bucket. Session cookies
+> stay `Secure` in every configuration; there is no insecure-cookie development switch.
 
 ### Active Directory (LDAPS) authentication
 
@@ -281,10 +376,10 @@ Authentication outcomes are normalized to `SUCCESS`, `REJECTED`, `UNAVAILABLE` o
 credential and an unknown user are indistinguishable to a caller. Passwords are used for
 one bind and never stored, logged, returned or placed in session state.
 
-Provider selection (`PENTAIA_AUTH_PROVIDER`) is a separate concern, described above:
-this provider knows nothing about which backend a deployment chose. The login route
-that turns a successful bind into a session still does not exist, so the provider is
-exercised through its own interface and through `scripts/ad_ldaps_check.py` today.
+Provider selection (`PENTAIA_AUTH_PROVIDER`) and the login flow are separate concerns,
+described above and below: this provider knows nothing about which backend a deployment
+chose, and nothing about sessions. It is exercised through its own interface, through
+the login route, and through `scripts/ad_ldaps_check.py`.
 
 #### Optional real-Active-Directory validation
 

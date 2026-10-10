@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from pentaia.webapp.auth.csrf import token_is_well_formed
 from pentaia.webapp.identity import AuthenticatedIdentity
 from pentaia.webapp.sessions import (
     DEFAULT_ABSOLUTE_LIFETIME_SECONDS,
@@ -138,6 +139,74 @@ def test_representations_of_session_records_redact_the_identifier(
     assert issued.session_id not in repr(issued.session)
     assert "<redacted>" in repr(issued)
     assert issued.session.label in repr(issued)
+
+
+# --- the session's CSRF token (P4-08) --------------------------------------
+
+
+def test_every_session_carries_its_own_well_formed_csrf_token(
+    store: InMemorySessionStore,
+) -> None:
+    first = store.create(identity(), now=START)
+    second = store.create(identity(), now=START)
+
+    assert token_is_well_formed(first.csrf_token)
+    assert len(first.csrf_token) >= 43, "32 bytes of entropy, URL-safe encoded"
+    assert first.csrf_token == first.session.csrf_token
+
+    assert second.csrf_token != first.csrf_token, "tokens must never be shared"
+    assert first.csrf_token != first.session_id
+    assert first.csrf_token != second.session_id
+
+
+def test_the_csrf_token_is_redacted_from_representations(
+    store: InMemorySessionStore,
+) -> None:
+    issued = store.create(identity(), now=START)
+
+    assert issued.csrf_token not in repr(issued)
+    assert issued.csrf_token not in str(issued)
+    assert issued.csrf_token not in repr(issued.session)
+    assert "csrf_token=<redacted>" in repr(issued)
+    assert "csrf_token=<redacted>" in repr(issued.session)
+
+
+def test_creating_a_session_never_logs_the_csrf_token(
+    store: InMemorySessionStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="pentaia.webapp.sessions"):
+        issued = store.create(identity(), now=START)
+        store.resolve(issued.session_id, now=START)
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert issued.csrf_token not in logged
+
+
+def test_a_malformed_csrf_token_is_refused(store: InMemorySessionStore) -> None:
+    """The record validates its own token, so a weak one cannot be constructed."""
+    issued = store.create(identity(), now=START)
+
+    for value in ("", "short token with spaces", "a" * 513, None, 12345):
+        with pytest.raises(ValueError):
+            dataclasses.replace(issued.session, csrf_token=value)  # type: ignore[arg-type]
+
+
+def test_the_store_uses_an_injected_clock() -> None:
+    """Expiry is driven by the clock the caller supplies, not the wall clock."""
+    moment = [START]
+    store = InMemorySessionStore(
+        idle_timeout_seconds=60,
+        absolute_lifetime_seconds=120,
+        clock=lambda: moment[0],
+    )
+
+    issued = store.create(identity())
+    assert store.resolve(issued.session_id) is not None
+
+    moment[0] = START + timedelta(seconds=61)
+    assert store.resolve(issued.session_id) is None
 
 
 def test_creating_and_resolving_a_session_never_logs_the_identifier(
@@ -312,7 +381,13 @@ def test_invalidating_an_unknown_session_reports_false(store: InMemorySessionSto
 # --- record shape and cookie foundation ------------------------------------
 
 
-def test_the_session_record_holds_no_identifier_or_credential() -> None:
+def test_the_session_record_holds_no_identifier_or_authentication_credential() -> None:
+    """P4-08 adds the session's own CSRF token; it is not an authentication credential.
+
+    The field set stays pinned: a password, a cookie value or the session identifier
+    itself still cannot be added without this test failing and the addition being
+    reviewed deliberately.
+    """
     fields = {field.name for field in dataclasses.fields(WebSession)}
 
     assert fields == {
@@ -322,9 +397,10 @@ def test_the_session_record_holds_no_identifier_or_credential() -> None:
         "last_activity_at",
         "absolute_expires_at",
         "idle_timeout_seconds",
+        "csrf_token",
     }
 
-    for forbidden in ("password", "token", "secret", "session_id", "cookie"):
+    for forbidden in ("password", "secret", "session_id", "cookie"):
         assert not [name for name in fields if forbidden in name]
 
 

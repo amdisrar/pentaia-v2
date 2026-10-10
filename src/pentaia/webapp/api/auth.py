@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 
 from pentaia.webapp.api.dependencies import (
     require_authenticated_session,
+    require_csrf,
     session_store,
 )
 from pentaia.webapp.sessions import WebSession, session_cookie_settings
@@ -29,7 +30,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/auth",
     tags=["auth"],
-    dependencies=[Depends(require_authenticated_session)],
+    # Logout changes state, so it requires the session's CSRF token. Mounting the check
+    # on the router rather than the route means anything added here inherits it.
+    dependencies=[Depends(require_authenticated_session), Depends(require_csrf)],
 )
 
 

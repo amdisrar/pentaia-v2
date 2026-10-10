@@ -45,7 +45,23 @@ def main() -> None:
         "Starting PentAiA web application host=%s port=%s", config.host, config.port
     )
 
-    uvicorn.run(app, host=config.host, port=config.port)
+    # ``proxy_headers=False`` is deliberate. uvicorn would otherwise rewrite
+    # ``scope["client"]`` from ``X-Forwarded-For`` using its own trust list, which would
+    # leave the application unable to tell a forwarded address from a real peer. The
+    # trust boundary lives in ``pentaia.webapp.auth.client_ip`` instead, driven by
+    # PENTAIA_TRUSTED_PROXIES, so there is exactly one place that decides what a client's
+    # address is and it is covered by tests.
+    #
+    # Consequence to keep in mind: ``request.url.scheme`` is ``http`` behind the TLS
+    # proxy. Nothing depends on it today (the session cookie is unconditionally Secure
+    # and no route redirects); a later issue that needs the forwarded scheme must add it
+    # beside that same trust check rather than re-enabling rewriting here.
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        proxy_headers=False,
+    )
 
 
 if __name__ == "__main__":

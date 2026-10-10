@@ -97,8 +97,9 @@ def test_the_browser_api_surface_is_exactly_the_reviewed_set() -> None:
 
     Reading the OpenAPI document is version-tolerant and fails loudly if a later change
     registers a route that was not reviewed. P4-02 asserted the two routes it created;
-    P4-04 deliberately adds the authenticated identity and logout routes, so the
-    expected set is updated rather than the assertion removed.
+    P4-04 added the authenticated identity and logout routes and P4-08 adds login and
+    CSRF token bootstrapping, so the expected set is updated rather than the assertion
+    removed.
     """
     app = create_app(WebAppConfig(docs_enabled=True))
 
@@ -110,16 +111,45 @@ def test_the_browser_api_surface_is_exactly_the_reviewed_set() -> None:
         "/api/status",
         "/api/me",
         "/api/auth/logout",
+        "/api/auth/login",
+        "/api/auth/csrf",
     }
 
     for path, operations in spec["paths"].items():
         assert set(operations) <= {"get", "post"}, path
 
+        # No route may accept a client-supplied value in its path or query string. That
+        # rules out a target, an action id, tool arguments, a conversation id or an
+        # approval reference arriving from the browser.
         for operation in operations.values():
-            # No route may accept any client-supplied value at this stage. Login, which
-            # will accept credentials, belongs to P4-05/P4-06.
             assert operation.get("parameters", []) == []
-            assert "requestBody" not in operation
+
+        # Exactly one route may accept a body, and the next test pins what it contains.
+        for method, operation in operations.items():
+            if (method, path) == ("post", "/api/auth/login"):
+                continue
+
+            assert "requestBody" not in operation, (method, path)
+
+
+def test_the_only_request_body_is_the_credential_body() -> None:
+    """Login accepts credentials and nothing else: no provider, role, target or flag."""
+    app = create_app(WebAppConfig(docs_enabled=True))
+
+    with TestClient(app) as client:
+        spec = client.get("/openapi.json").json()
+
+    body = spec["paths"]["/api/auth/login"]["post"]["requestBody"]
+    reference = body["content"]["application/json"]["schema"]["$ref"]
+    schema = spec["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+
+    assert set(schema["properties"]) == {"username", "password"}
+    assert set(schema["required"]) == {"username", "password"}
+    assert {field["type"] for field in schema["properties"].values()} == {"string"}
+
+    # No other route in the document accepts a body, so nothing else can be steered.
+    assert "requestBody" not in spec["paths"]["/api/auth/logout"]["post"]
+    assert "requestBody" not in spec["paths"]["/api/auth/csrf"]["get"]
 
 
 def test_status_is_registered_but_fails_closed(client: TestClient) -> None:
@@ -182,3 +212,25 @@ def test_the_module_entry_point_is_importable_and_runnable() -> None:
     from pentaia.webapp import __main__ as webapp_main
 
     assert callable(webapp_main.main)
+
+
+def test_the_startup_log_records_the_origin_verification_mode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator must be able to see whether full-origin checking is active."""
+
+    def start(config: WebAppConfig) -> str:
+        caplog.clear()
+
+        with (
+            caplog.at_level("INFO", logger="pentaia.webapp.app"),
+            TestClient(create_app(config)),
+        ):
+            pass
+
+        return "\n".join(record.getMessage() for record in caplog.records)
+
+    assert "public_origin=unset" in start(WebAppConfig())
+    assert "public_origin=https://testserver:443" in start(
+        WebAppConfig(public_origin="https://testserver")
+    )

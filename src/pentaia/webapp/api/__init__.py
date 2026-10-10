@@ -11,8 +11,10 @@ resolved and validated server-side. No route may build a native command or reach
 Kali executor, directly or indirectly, because the web layer must not become a second
 execution path to Kali. ``tests/test_webapp_boundaries.py`` enforces both rules.
 
-``/api/auth/login`` is intentionally absent. Authentication providers arrive in P4-05
-and P4-06, and P4-04 adds no placeholder that could be mistaken for a login.
+``/api/auth/login`` and ``/api/auth/csrf`` are the exception, and they sit on their own
+router (:mod:`pentaia.webapp.api.login`) because they must be reachable without a
+session. That separation is deliberate and visible: a route that needs to be public
+cannot be added here by accident.
 """
 
 from fastapi import APIRouter
@@ -20,10 +22,12 @@ from fastapi import APIRouter
 from pentaia.webapp.api.auth import router as auth_router
 from pentaia.webapp.api.health import router as health_router
 from pentaia.webapp.api.identity import router as identity_router
+from pentaia.webapp.api.login import router as login_router
 from pentaia.webapp.api.status import router as status_router
 
 API_ROUTERS: tuple[APIRouter, ...] = (
     health_router,
+    login_router,
     status_router,
     identity_router,
     auth_router,

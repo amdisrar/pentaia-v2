@@ -29,13 +29,28 @@ FORBIDDEN_IDENTIFIERS = (
 
 # Endpoints the browser shell is allowed to call. Later issues extend this set
 # deliberately; conversation and approval endpoints arrive in P4-11 and P4-12.
-ALLOWED_BROWSER_ENDPOINTS = {"/healthz", "/api/status"}
+#
+# P4-08 adds the authentication endpoints: the shell signs in, signs out, and reads its
+# own identity and CSRF token. Nothing else may be referenced, so a route cannot be
+# reached from the browser without appearing here first.
+ALLOWED_BROWSER_ENDPOINTS = {
+    "/healthz",
+    "/api/status",
+    "/api/me",
+    "/api/auth/csrf",
+    "/api/auth/login",
+    "/api/auth/logout",
+}
 
 SHELL_ELEMENT_IDS = (
     # login state
     "login-view",
-    "login-notice",
-    "preview-shell",
+    "login-subtitle",
+    "login-form",
+    "login-username",
+    "login-password",
+    "login-submit",
+    "login-error",
     # shell chrome
     "app-view",
     "app-header",
@@ -187,7 +202,7 @@ def test_the_shell_contains_no_stack_trace_or_python_source(client: TestClient) 
         assert "import fastapi" not in body, path
 
 
-def test_the_browser_only_calls_the_two_safe_status_endpoints(client: TestClient) -> None:
+def test_the_browser_calls_only_the_reviewed_endpoints(client: TestClient) -> None:
     script = client.get("/static/js/app.js").text
 
     referenced = {
@@ -259,14 +274,33 @@ def test_the_shell_exposes_the_required_navigation(client: TestClient) -> None:
         assert f'data-nav="{target}"' in body, target
 
 
-def test_the_login_state_offers_no_credential_entry(client: TestClient) -> None:
-    """No fake authentication: there is no password field in this build."""
-    body = html(client).lower()
+def test_the_login_form_posts_credentials_to_the_login_endpoint(
+    client: TestClient,
+) -> None:
+    """The sign-in form is real, and a password can never end up in a URL.
 
-    assert 'type="password"' not in body
-    assert "<form" in body  # the message composer exists
-    assert 'name="username"' not in body
-    assert "autocomplete=\"current-password\"" not in body
+    P4-03 shipped no credential entry at all; P4-08 replaces that placeholder, so this
+    test is inverted rather than removed. ``method="post"`` with no ``action`` is the
+    part that matters: if the script fails to load, the browser posts a body to this same
+    origin instead of appending the credentials to the URL.
+    """
+    body = html(client)
+
+    assert 'type="password"' in body
+    assert 'name="username"' in body
+    assert 'name="password"' in body
+    assert 'autocomplete="username"' in body
+    assert 'autocomplete="current-password"' in body
+
+    form = re.search(r"<form[^>]*id=\"login-form\"[^>]*>", body)
+
+    assert form is not None
+    assert 'method="post"' in form.group(0)
+    assert "action=" not in form.group(0), "a native submit target could carry a URL"
+
+    # The form is driven by script; the endpoint it uses is the reviewed one.
+    script = client.get("/static/js/app.js").text
+    assert '"/api/auth/login"' in script
 
 
 def test_the_shell_states_that_conversations_are_not_durable(client: TestClient) -> None:
@@ -403,3 +437,157 @@ def test_the_gui_directory_is_the_only_static_root() -> None:
     assert INDEX_FILE.is_file()
     assert (STATIC_DIRECTORY / "css" / "app.css").is_file()
     assert (STATIC_DIRECTORY / "js" / "app.js").is_file()
+
+
+# --- P4-08 sign-in state ---------------------------------------------------
+
+
+def test_the_shell_keeps_credentials_and_tokens_out_of_browser_storage(
+    client: TestClient,
+) -> None:
+    """No persistent storage anywhere in the shell: a reload must lose the token.
+
+    Naming a storage API in a comment that forbids it is fine, so these check for use
+    rather than for the word.
+    """
+    script = client.get("/static/js/app.js").text
+
+    for api in ("localStorage", "sessionStorage", "indexedDB"):
+        assert not re.search(rf"\b{api}\s*[.\[]", script), api
+
+    assert not re.search(r"document\.cookie\s*=", script)
+
+
+def test_the_shell_never_puts_a_token_or_credential_in_a_url(client: TestClient) -> None:
+    """Tokens travel in a header; the URL carries only the view fragment."""
+    script = client.get("/static/js/app.js").text
+
+    assert "location.search" not in script
+    assert "location.href" not in script
+    assert "csrf_token=" not in script
+    assert "password=" not in script
+    assert "username=" not in script
+
+
+def test_the_shell_sends_the_reviewed_csrf_header(client: TestClient) -> None:
+    script = client.get("/static/js/app.js").text
+
+    assert 'var CSRF_HEADER = "X-PentAiA-CSRF"' in script
+    assert "headers[CSRF_HEADER]" in script
+
+
+def test_the_shell_never_renders_server_provided_text(client: TestClient) -> None:
+    """Status codes map to fixed strings, so a response body cannot become page text."""
+    script = client.get("/static/js/app.js").text
+
+    # The FastAPI error envelope is never read, and no server string is inserted: the
+    # message shown comes from this file's own fixed table, chosen by status code.
+    assert "result.body.detail" not in script
+    assert "body.detail" not in script
+    assert "body.error" not in script
+    assert "showLoginError(messageForStatus(result.response.status))" in script
+
+    # Every response field the shell reads is named here. A new one has to be added to
+    # this set deliberately, which is what stops a response body being rendered wholesale.
+    read_fields = set(re.findall(r"\b(?:result\.)?body\.([A-Za-z_]+)", script))
+
+    assert read_fields == {"username", "display_name", "csrf_token"}
+
+
+def test_the_shell_handles_every_authentication_failure_state(client: TestClient) -> None:
+    """Each answer the login route can give has its own honest message."""
+    script = client.get("/static/js/app.js").text
+
+    for status in ("401", "403", "429", "503"):
+        assert status in script, status
+
+    for key in ("rejected", "unverified", "throttled", "unavailable", "expired"):
+        assert key in script, key
+
+
+def test_the_shell_clears_the_password_field_after_a_submission(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/js/app.js").text
+
+    assert 'byId("login-password")' in script
+    assert "passwordField.value = \"\"" in script
+
+
+def test_the_shell_asks_the_server_who_the_caller_is(client: TestClient) -> None:
+    """The signed-in state comes from the server, never from a stored flag."""
+    script = client.get("/static/js/app.js").text
+
+    assert '"/api/me"' in script
+    assert "bootstrap" in script
+    assert "state.authenticated" in script
+    # The preview flag P4-03 used to fake a signed-in state is gone.
+    assert "preview" not in script.lower()
+
+
+def test_the_shell_addresses_the_sign_in_controls_it_needs(client: TestClient) -> None:
+    body = html(client)
+    script = client.get("/static/js/app.js").text
+
+    for element_id in ("login-form", "login-username", "login-password", "login-submit", "login-error", "logout-button"):
+        assert f'id="{element_id}"' in body, element_id
+        assert f'byId("{element_id}")' in script, element_id
+
+
+# --- the sign-in screen shows nothing about the implementation -------------
+
+
+def test_the_login_screen_shows_only_the_sign_in_copy(client: TestClient) -> None:
+    """The sign-in card carries the application name, the form and nothing else.
+
+    The exact visible string is pinned, so a line added here — a deployment note, a
+    provider name, a security explanation — has to be reviewed deliberately instead of
+    arriving as a side effect of another change. Markup comments are not visible text and
+    are ignored; the error paragraph is empty until the application fills it.
+    """
+    section = re.search(r'<section id="login-view".*?</section>', html(client), re.DOTALL)
+
+    assert section is not None
+
+    visible = re.sub(r"<!--.*?-->", " ", section.group(0), flags=re.DOTALL)
+    visible = re.sub(r"<[^>]+>", " ", visible)
+
+    assert " ".join(visible.split()) == (
+        "PentAiA Sign in to continue Username Password Sign in"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AI-assisted penetration testing",
+        "explicitly authorized lab systems",
+        "Credentials are sent to this application",
+        "never placed in a URL",
+        "HTTPS origin",
+        "identity provider",
+        "LDAP",
+        "RADIUS",
+        "PENTAIA_",
+        "CSRF",
+    ],
+)
+def test_the_login_screen_does_not_describe_the_implementation(
+    client: TestClient, text: str
+) -> None:
+    """No deployment, provider, protocol or security-implementation wording on screen."""
+    assert text.lower() not in html(client).lower(), text
+
+
+def test_the_login_screen_keeps_the_application_name_prominent(
+    client: TestClient,
+) -> None:
+    """The product name is what the screen leads with, not a paragraph about the app."""
+    heading = re.search(r'<h1[^>]*id="login-heading"[^>]*>([^<]*)</h1>', html(client))
+
+    assert heading is not None
+    assert heading.group(1).strip() == "PentAiA"
+
+    stylesheet = client.get("/static/css/app.css").text
+    assert ".login-card h1" in stylesheet, "the sign-in heading has its own treatment"
+    assert "#login-subtitle" in stylesheet

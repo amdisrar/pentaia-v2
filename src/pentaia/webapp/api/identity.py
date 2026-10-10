@@ -15,13 +15,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from pentaia.webapp.api.dependencies import require_authenticated_identity
+from pentaia.webapp.api.dependencies import (
+    require_authenticated_identity,
+    require_csrf,
+)
 from pentaia.webapp.identity import AuthenticatedIdentity
 
 router = APIRouter(
     prefix="/api",
     tags=["identity"],
-    dependencies=[Depends(require_authenticated_identity)],
+    dependencies=[Depends(require_authenticated_identity), Depends(require_csrf)],
 )
 
 

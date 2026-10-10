@@ -22,22 +22,33 @@ Design notes that matter for review:
 * **Session fixation.** An identifier is issued only by :meth:`SessionStore.create`,
   which always generates a fresh 256-bit value, so an authenticated session can never
   inherit an identifier a client chose or already knows. Because this build has no
-  pre-authentication session at all, there is nothing to carry over at login; P4-08
-  wires the cookie-side handling for the login flow itself.
+  pre-authentication session at all, there is nothing to carry over at login; the login
+  flow (P4-08) additionally destroys whatever session the presented cookie points to
+  before issuing a new one.
+* **A per-session CSRF token.** Each record carries an independent 256-bit token that
+  the browser must echo in a header on state-changing requests. It lives here, in the
+  authoritative record, rather than in a cookie the client can choose. It is redacted
+  from ``repr`` and is never logged.
 
-Timeouts follow the architecture defaults, idle 30 minutes and absolute 12 hours.
-They are constructor arguments rather than environment configuration because P4-08
-owns making them configurable and validated.
+Timeouts follow the architecture defaults, idle 30 minutes and absolute 12 hours, and
+are configurable through ``pentaia.webapp.config`` (P4-08). The store takes a clock so
+expiry behaviour is deterministic in tests without sleeping.
 """
 
 import hashlib
 import logging
 import secrets
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, TypedDict
 
+from pentaia.webapp.auth.csrf import (
+    MAX_CSRF_TOKEN_LENGTH,
+    generate_csrf_token,
+    token_is_well_formed,
+)
 from pentaia.webapp.identity import AuthenticatedIdentity
 
 logger = logging.getLogger(__name__)
@@ -104,6 +115,11 @@ class WebSession:
     Contains no credential material and, by construction, no session identifier: the
     identifier is returned exactly once by :meth:`SessionStore.create` and the store
     keeps only its digest. ``label`` is the value to log or account against.
+
+    ``csrf_token`` is the session's own anti-CSRF secret. It is a session-scoped
+    capability rather than an authentication credential — on its own it authenticates
+    nobody, and it is useless without the session cookie — but it is treated as a
+    secret all the same: redacted from ``repr``, never logged, never placed in a URL.
     """
 
     label: str
@@ -112,10 +128,24 @@ class WebSession:
     last_activity_at: datetime
     absolute_expires_at: datetime
     idle_timeout_seconds: int
+    csrf_token: str
+
+    def __repr__(self) -> str:
+        """Redact the CSRF token, which must never appear in a log or traceback."""
+        return (
+            f"WebSession(label={self.label!r}, user_id={self.identity.user_id!r}, "
+            "csrf_token=<redacted>)"
+        )
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.startswith(LABEL_PREFIX):
             raise ValueError(f"label must start with '{LABEL_PREFIX}'.")
+
+        if not token_is_well_formed(self.csrf_token):
+            raise ValueError(
+                f"csrf_token must be a well-formed token of at most "
+                f"{MAX_CSRF_TOKEN_LENGTH} characters."
+            )
 
         object.__setattr__(self, "created_at", _as_utc(self.created_at, field="created_at"))
         object.__setattr__(
@@ -170,18 +200,22 @@ class WebSession:
 
 @dataclass(frozen=True)
 class IssuedSession:
-    """A newly created session together with its identifier.
+    """A newly created session together with its identifiers.
 
-    The identifier exists only in this object, which is returned exactly once per
-    session. Logging, storing or placing an ``IssuedSession`` into graph state would
-    leak a live credential, so ``__repr__`` redacts it.
+    The session identifier and the CSRF token exist only in this object, which is
+    returned exactly once per session. Logging, storing or placing an ``IssuedSession``
+    into graph state would leak a live credential, so ``__repr__`` redacts both.
     """
 
     session_id: str
+    csrf_token: str
     session: WebSession
 
     def __repr__(self) -> str:
-        return f"IssuedSession(label={self.session.label!r}, session_id=<redacted>)"
+        return (
+            f"IssuedSession(label={self.session.label!r}, session_id=<redacted>, "
+            "csrf_token=<redacted>)"
+        )
 
     __str__ = __repr__
 
@@ -235,6 +269,7 @@ class InMemorySessionStore:
         *,
         idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS,
         absolute_lifetime_seconds: int = DEFAULT_ABSOLUTE_LIFETIME_SECONDS,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._idle_timeout_seconds = _positive_seconds(
             idle_timeout_seconds, field="idle_timeout_seconds"
@@ -242,9 +277,14 @@ class InMemorySessionStore:
         self._absolute_lifetime_seconds = _positive_seconds(
             absolute_lifetime_seconds, field="absolute_lifetime_seconds"
         )
+        self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._records: dict[str, WebSession] = {}
         self._labels: dict[str, str] = {}
         self._lock = threading.Lock()
+
+    def _now(self, now: datetime | None) -> datetime:
+        """Resolve the current time, honouring an injected clock in tests."""
+        return _as_utc(now if now is not None else self._clock(), field="now")
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -255,7 +295,7 @@ class InMemorySessionStore:
         now: datetime | None = None,
     ) -> IssuedSession:
         """Issue a new session. Every call produces a new, independent identifier."""
-        moment = _as_utc(now or datetime.now(UTC), field="now")
+        moment = self._now(now)
 
         # A wrong type here is a programming error rather than bad input, so it raises
         # TypeError. Value validation elsewhere in this module raises ValueError.
@@ -264,6 +304,7 @@ class InMemorySessionStore:
 
         session_id = generate_session_id()
         key = _digest(session_id)
+        csrf_token = generate_csrf_token()
 
         with self._lock:
             label = _generate_label()
@@ -278,6 +319,7 @@ class InMemorySessionStore:
                 absolute_expires_at=moment
                 + timedelta(seconds=self._absolute_lifetime_seconds),
                 idle_timeout_seconds=self._idle_timeout_seconds,
+                csrf_token=csrf_token,
             )
 
             self._records[key] = session
@@ -290,7 +332,11 @@ class InMemorySessionStore:
             identity.auth_source,
         )
 
-        return IssuedSession(session_id=session_id, session=session)
+        return IssuedSession(
+            session_id=session_id,
+            csrf_token=csrf_token,
+            session=session,
+        )
 
     def resolve(
         self,
@@ -306,7 +352,7 @@ class InMemorySessionStore:
         if not isinstance(session_id, str) or not session_id:
             return None
 
-        moment = _as_utc(now or datetime.now(UTC), field="now")
+        moment = self._now(now)
         key = _digest(session_id)
 
         with self._lock:
@@ -374,7 +420,7 @@ class InMemorySessionStore:
 
     def purge_expired(self, *, now: datetime | None = None) -> int:
         """Destroy every expired session, returning the count removed."""
-        moment = _as_utc(now or datetime.now(UTC), field="now")
+        moment = self._now(now)
 
         with self._lock:
             keys = [

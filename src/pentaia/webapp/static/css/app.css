@@ -196,6 +196,67 @@ button.ghost {
   max-width: 460px;
 }
 
+/* The sign-in card carries the application name and the form, and nothing else: no
+   deployment, provider or security-implementation text. The name is the one prominent
+   element; the fields stay left-aligned because labels read better that way. */
+.login-card h1 {
+  font-size: 2rem;
+  margin-bottom: 4px;
+  text-align: center;
+}
+
+#login-subtitle {
+  margin-bottom: 0;
+  text-align: center;
+}
+
+/* The sign-in form (P4-08). Plain fields, no decoration that could imply a
+   provider: which provider authenticates is a server-side decision. */
+#login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 20px 0 12px;
+}
+
+#login-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#login-form label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+#login-form input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: inherit;
+  font: inherit;
+  padding: 10px 12px;
+}
+
+#login-form input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#login-form button[type="submit"] {
+  margin-top: 4px;
+}
+
+#login-form button[type="submit"][disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+#login-error {
+  margin-top: 0;
+}
+
 /* Application shell -------------------------------------------------------- */
 
 .app {

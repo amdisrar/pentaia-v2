@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pentaia.webapp import WebAppConfig, create_app
+from pentaia.webapp.auth.csrf import CSRF_HEADER_NAME
 from pentaia.webapp.identity import AuthenticatedIdentity
 from pentaia.webapp.sessions import SESSION_COOKIE_NAME
 
@@ -63,6 +64,19 @@ def forget_cookie(client: TestClient) -> None:
     client.cookies.clear()
 
 
+def logout(client: TestClient, issued, **kwargs):
+    """Post a logout carrying the session's CSRF token.
+
+    P4-08 makes logout a state-changing request, so the token is required; a request
+    without it is refused and the session stays alive, which is asserted separately.
+    """
+    return client.post(
+        "/api/auth/logout",
+        headers={CSRF_HEADER_NAME: issued.csrf_token},
+        **kwargs,
+    )
+
+
 # --- the surface is authenticated by default -------------------------------
 
 
@@ -80,9 +94,17 @@ API_OPERATIONS = [
     ("POST", "/api/auth/logout"),
 ]
 
+#: The methods and paths that must be reachable *without* a session. P4-08 adds them, so
+#: the list is pinned separately: the test below proves the whole rest of ``/api`` still
+#: requires an identity, and the second test proves nothing else became public.
+PUBLIC_API_OPERATIONS = [
+    ("GET", "/api/auth/csrf"),
+    ("POST", "/api/auth/login"),
+]
+
 
 def test_the_schema_advertises_the_reviewed_api_surface(app_and_client) -> None:
-    """Every advertised /api route must appear in API_OPERATIONS and vice versa."""
+    """Every advertised /api route must be accounted for, private or public."""
     _, client = app_and_client
 
     spec = client.get("/openapi.json").json()
@@ -93,7 +115,25 @@ def test_the_schema_advertises_the_reviewed_api_surface(app_and_client) -> None:
         for method in operations
     )
 
-    assert advertised == API_OPERATIONS
+    assert advertised == sorted(API_OPERATIONS + PUBLIC_API_OPERATIONS)
+
+
+def test_only_the_reviewed_routes_are_reachable_without_a_session(
+    app_and_client,
+) -> None:
+    """The unauthenticated part of the API surface is exactly login and its token.
+
+    The schema test above proves those two lists cover every advertised ``/api`` route,
+    and the parametrised test proves the authenticated ones refuse a session-less caller.
+    What is left to check here is the other direction: the public routes really are
+    reachable, so a future route cannot be moved onto the public router unnoticed.
+    """
+    _, client = app_and_client
+
+    for method, path in PUBLIC_API_OPERATIONS:
+        response = client.request(method, path)
+
+        assert response.status_code != 401, f"{method} {path} required a session"
 
 
 @pytest.mark.parametrize(("method", "path"), API_OPERATIONS)
@@ -238,7 +278,7 @@ def test_logout_destroys_the_server_side_session(app_and_client) -> None:
     sign_in(client, issued.session_id)
     assert app.state.session_store.active_count == 1
 
-    response = client.post("/api/auth/logout")
+    response = logout(client, issued)
 
     assert response.status_code == 204
     assert app.state.session_store.active_count == 0
@@ -251,9 +291,10 @@ def test_logout_destroys_the_server_side_session(app_and_client) -> None:
 
 def test_logout_clears_the_cookie_with_the_session_attributes(app_and_client) -> None:
     app, client = app_and_client
-    sign_in(client, issue(app).session_id)
+    issued = issue(app)
+    sign_in(client, issued.session_id)
 
-    response = client.post("/api/auth/logout")
+    response = logout(client, issued)
 
     set_cookie = response.headers.get("set-cookie", "")
 
@@ -270,7 +311,7 @@ def test_logout_leaves_other_sessions_alone(app_and_client) -> None:
     second = issue(app)
 
     sign_in(client, first.session_id)
-    client.post("/api/auth/logout")
+    assert logout(client, first).status_code == 204
 
     sign_in(client, second.session_id)
     assert client.get("/api/me").status_code == 200
@@ -278,9 +319,10 @@ def test_logout_leaves_other_sessions_alone(app_and_client) -> None:
 
 def test_logging_out_twice_fails_closed(app_and_client) -> None:
     app, client = app_and_client
-    sign_in(client, issue(app).session_id)
+    issued = issue(app)
+    sign_in(client, issued.session_id)
 
-    assert client.post("/api/auth/logout").status_code == 204
+    assert logout(client, issued).status_code == 204
 
     forget_cookie(client)
     assert client.post("/api/auth/logout").status_code == 401
@@ -294,7 +336,7 @@ def test_logout_does_not_log_the_raw_identifier(
     sign_in(client, issued.session_id)
 
     with caplog.at_level(logging.INFO, logger="pentaia.webapp.api.auth"):
-        client.post("/api/auth/logout")
+        assert logout(client, issued).status_code == 204
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
 
@@ -302,28 +344,36 @@ def test_logout_does_not_log_the_raw_identifier(
     assert issued.session.label in logged
 
 
-# --- no fake authentication surface ---------------------------------------
+# --- the login route exists, and is not a bypass ---------------------------
 
 
-def test_there_is_no_login_route(app_and_client) -> None:
-    """P4-04 must not invent a login; providers arrive in P4-05/P4-06."""
+def test_the_login_route_exists_and_issues_nothing_without_credentials(
+    app_and_client,
+) -> None:
+    """P4-08 replaces the P4-04 placeholder with a real route, not an open door."""
     _, client = app_and_client
 
-    assert (
-        client.post("/api/auth/login", json={"username": "u", "password": "p"}).status_code
-        == 404
+    # Reachable without a session, but a request without credentials is refused by
+    # validation and never produces a cookie.
+    missing_body = client.post("/api/auth/login")
+    assert missing_body.status_code == 422
+    assert SESSION_COOKIE_NAME not in missing_body.headers.get("set-cookie", "")
+
+    # No session cookie is issued by a refusal, whichever refusal it is.
+    refused = client.post(
+        "/api/auth/login", json={"username": "u", "password": "p"}
     )
-    assert client.get("/api/auth/login").status_code == 404
+    assert refused.status_code in (401, 403, 503)
+    assert SESSION_COOKIE_NAME not in refused.headers.get("set-cookie", "")
 
 
 def test_the_browser_shell_cannot_obtain_or_assert_a_session(app_and_client) -> None:
-    """Preview is a client-side layout state only: it never authenticates."""
+    """The shell is static: it holds no session identifier and asserts no identity."""
     _, client = app_and_client
 
     for path in ("/", "/static/js/app.js", "/static/css/app.css"):
         body = client.get(path).text
         assert SESSION_COOKIE_NAME not in body, path
-        assert "api/auth" not in body, path
 
 
 # --- P4-02 / P4-03 behaviour is unchanged ---------------------------------
@@ -359,9 +409,12 @@ def test_the_refusal_reveals_nothing_about_the_session(app_and_client) -> None:
 
 
 def test_the_gui_shell_still_loads(app_and_client) -> None:
+    """P4-08 replaces the preview placeholder with a real sign-in form."""
     _, client = app_and_client
 
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Preview" in response.text
+    assert 'id="login-form"' in response.text
+    assert 'type="password"' in response.text
+    assert "Preview" not in response.text

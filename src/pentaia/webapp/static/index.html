@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PentAiA</title>
     <!--
-      P4-03 GUI shell.
+      P4-03 GUI shell; the sign-in state is wired to the real login route in P4-08.
 
       This file is served verbatim as a static asset. There is no server-side
       templating and no injected configuration anywhere in the shell, so backend
@@ -24,21 +24,44 @@
     <section id="login-view" class="view login" data-view="login" aria-labelledby="login-heading">
       <div class="card login-card">
         <h1 id="login-heading">PentAiA</h1>
-        <p class="muted">AI-assisted penetration testing for explicitly authorized lab systems.</p>
+        <p class="muted" id="login-subtitle">Sign in to continue</p>
 
-        <div class="notice" data-tone="warning" id="login-notice">
-          <strong>Authentication is not implemented yet.</strong>
-          <p>
-            Enterprise sign-in (Active Directory and RADIUS) arrives in P4-04 to P4-07.
-            This build has no credential entry, no session and no signed-in user.
-          </p>
-        </div>
+        <!--
+          method="post" with no action attribute, on purpose. If this script ever fails
+          to load, the browser posts the credentials in a request body to this same
+          origin rather than appending them to the URL, so a password can never reach a
+          URL, a referrer header or browser history. The application answers 405 to that
+          request and nothing is logged.
+        -->
+        <form id="login-form" method="post" novalidate>
+          <div class="field">
+            <label for="login-username">Username</label>
+            <input
+              id="login-username"
+              name="username"
+              type="text"
+              autocomplete="username"
+              autocapitalize="none"
+              spellcheck="false"
+              required
+            />
+          </div>
 
-        <button id="preview-shell" type="button" class="primary">Preview the application shell</button>
-        <p class="muted small">
-          Preview opens the interface without authenticating anyone and shows no
-          operational data. It is a layout preview, not a sign-in.
-        </p>
+          <div class="field">
+            <label for="login-password">Password</label>
+            <input
+              id="login-password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+          </div>
+
+          <button id="login-submit" type="submit" class="primary">Sign in</button>
+        </form>
+
+        <p id="login-error" class="notice" data-tone="error" role="alert" hidden></p>
       </div>
     </section>
 
@@ -47,23 +70,11 @@
       <header id="app-header">
         <div class="header-left">
           <span class="brand">PentAiA</span>
-          <span id="preview-badge" class="badge" data-tone="warning" hidden>
-            Preview &mdash; not authenticated
-          </span>
         </div>
 
         <div id="session-area">
           <span id="session-identity" class="muted small">Not signed in</span>
-          <button id="exit-preview" type="button" class="ghost" hidden>Exit preview</button>
-          <button
-            id="logout-button"
-            type="button"
-            class="ghost"
-            disabled
-            title="Sign-out arrives with authentication in P4-04"
-          >
-            Log out
-          </button>
+          <button id="logout-button" type="button" class="ghost" disabled>Log out</button>
         </div>
       </header>
 
