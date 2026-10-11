@@ -23,6 +23,8 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 
+from pentaia.appstore.errors import StoreError
+from pentaia.appstore.recorder import AccountingRecorder
 from pentaia.webapp.auth.base import AuthProvider
 from pentaia.webapp.auth.client_ip import TrustedProxySet, resolve_client_ip
 from pentaia.webapp.auth.csrf import (
@@ -39,6 +41,11 @@ from pentaia.webapp.sessions import SESSION_COOKIE_NAME, SessionStore, WebSessio
 logger = logging.getLogger(__name__)
 
 AUTHENTICATION_REQUIRED_DETAIL = "Authentication required."
+
+#: One answer when the application's own storage is unavailable. It says nothing about
+#: whether the caller had a session: a storage failure is not an authentication decision,
+#: and answering 401 here would tell a signed-in caller they are signed out.
+STORAGE_UNAVAILABLE_DETAIL = "The service is temporarily unavailable."
 
 #: The one answer a caller gets when CSRF verification fails. It says nothing about
 #: which check failed, so it cannot be used to probe the token comparison.
@@ -59,6 +66,38 @@ def authentication_provider(request: Request) -> AuthProvider | None:
     an authentication success.
     """
     return getattr(request.app.state, "auth_provider", None)
+
+
+def accounting_recorder(request: Request) -> AccountingRecorder:
+    """Return the application's accounting recorder.
+
+    Wired by ``create_app``; a missing recorder is a wiring fault, and the caller raises
+    rather than silently recording nothing.
+    """
+    recorder = getattr(request.app.state, "accounting", None)
+
+    if recorder is None:
+        raise RuntimeError(
+            "The web application has no accounting recorder configured; build it with "
+            "create_app()."
+        )
+
+    return recorder
+
+
+def accounting_state(request: Request) -> str:
+    """Return the accounting subsystem's coarse health, for the status surface.
+
+    A category only — ``active``, ``degraded`` or ``disabled``. The store's own error text
+    is never exposed: a storage message can name a path or a database error, and the
+    status endpoint is read by an operator, not by the operator's filesystem.
+    """
+    recorder = getattr(request.app.state, "accounting", None)
+
+    if recorder is None:
+        return "disabled"
+
+    return str(recorder.state.value)
 
 
 def client_ip(request: Request) -> str:
@@ -146,13 +185,29 @@ def resolve_session(request: Request) -> WebSession | None:
 
     Absent, unknown, invalid and expired sessions are indistinguishable to the caller
     and all yield ``None``.
+
+    A storage failure is different and is reported as such: the caller is told the service
+    is temporarily unavailable rather than being treated as unauthenticated, which would
+    sign a valid user out for a reason that has nothing to do with their session. The
+    refusal carries no driver message, SQL or path.
     """
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
 
     if not session_id:
         return None
 
-    return session_store(request).resolve(session_id)
+    try:
+        return session_store(request).resolve(session_id)
+    except StoreError as exc:
+        logger.error(
+            "Session resolution failed reason=store_unavailable exception=%s",
+            type(exc).__name__,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=STORAGE_UNAVAILABLE_DETAIL,
+        ) from exc
 
 
 def require_authenticated_session(

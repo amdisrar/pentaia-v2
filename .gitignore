@@ -25,3 +25,5 @@ Thumbs.db
 # Logs
 *.log
 logs/
+# Application store: runtime data written under PENTAIA_DATA_DIR
+data/

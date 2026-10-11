@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from pentaia.webapp.api.dependencies import (
+    accounting_state,
     authentication_provider,
     require_authenticated_identity,
     require_csrf,
@@ -54,25 +55,36 @@ class StatusResponse(BaseModel):
     Readiness is a *construction* fact, not a reachability check. The identity source
     is contacted when a credential is verified (P4-08), not while the application
     starts, so ``authentication_ready`` does not promise the directory is up.
+
+    ``accounting`` reports the accounting subsystem's coarse health: ``active``,
+    ``degraded`` (an event was not recorded, so the trail has a gap) or ``disabled`` (no
+    durable store is configured). It is a category, never a message — a storage error can
+    name a path or a database detail, and none of that belongs on this surface.
     """
 
     application: str = APPLICATION_NAME
     authentication_provider: str | None = None
     authentication_ready: bool = False
+    accounting: str = "disabled"
 
 
-def build_status_payload(auth_provider: AuthProvider | None = None) -> StatusResponse:
+def build_status_payload(
+    auth_provider: AuthProvider | None = None,
+    *,
+    accounting: str = "disabled",
+) -> StatusResponse:
     """Build the current safe status payload.
 
     Both authentication fields are derived from the one active provider object, so
     they cannot disagree: the provider that exists *is* the provider that is named.
 
-    P4-02 had no provider to report. Later issues extend this function; they must keep
-    the result free of secrets.
+    P4-02 had no provider to report, and P4-09 added the accounting state. Later issues
+    extend this function; they must keep the result free of secrets.
     """
     return StatusResponse(
         authentication_provider=None if auth_provider is None else auth_provider.name,
         authentication_ready=auth_provider is not None,
+        accounting=accounting,
     )
 
 
@@ -83,4 +95,7 @@ async def status_endpoint(request: Request) -> StatusResponse:
     Unreachable until authentication exists: the router dependency refuses first, by
     design.
     """
-    return build_status_payload(authentication_provider(request))
+    return build_status_payload(
+        authentication_provider(request),
+        accounting=accounting_state(request),
+    )

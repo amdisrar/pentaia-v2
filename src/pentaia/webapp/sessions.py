@@ -77,8 +77,12 @@ def generate_session_id() -> str:
     return secrets.token_urlsafe(SESSION_ID_BYTES)
 
 
-def _digest(session_id: str) -> str:
-    """Key material for the store: the raw identifier is never stored."""
+def session_digest(session_id: str) -> str:
+    """Key material for the store: the raw identifier is never stored.
+
+    Public so a durable store keys sessions exactly the same way. Two different digest
+    rules would not be a subtle bug: the lookup would simply never find the record.
+    """
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
 
@@ -303,7 +307,7 @@ class InMemorySessionStore:
             raise TypeError("identity must be an AuthenticatedIdentity.")
 
         session_id = generate_session_id()
-        key = _digest(session_id)
+        key = session_digest(session_id)
         csrf_token = generate_csrf_token()
 
         with self._lock:
@@ -353,7 +357,7 @@ class InMemorySessionStore:
             return None
 
         moment = self._now(now)
-        key = _digest(session_id)
+        key = session_digest(session_id)
 
         with self._lock:
             session = self._records.get(key)
@@ -386,7 +390,7 @@ class InMemorySessionStore:
             return False
 
         with self._lock:
-            return self._discard(_digest(session_id))
+            return self._discard(session_digest(session_id))
 
     def invalidate_label(self, label: str) -> bool:
         """Destroy one session by its safe label."""

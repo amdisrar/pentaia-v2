@@ -207,6 +207,9 @@ Copy the keys you need into `.env` (loaded automatically):
 | `PENTAIA_WEB_HOST`, `PENTAIA_WEB_PORT` | web application bind address (default `127.0.0.1:8000`) |
 | `PENTAIA_WEB_DOCS` | enable `/docs` (default false) |
 | `PENTAIA_AUTH_PROVIDER` | identity provider for the web application: `ad` or `radius`, blank for none |
+| `PENTAIA_STORE_MODE` | `memory` (default, development) or `sqlite` (operational, durable) |
+| `PENTAIA_DATA_DIR` | directory holding the durable store; required when the mode is `sqlite` |
+| `PENTAIA_DB_BUSY_TIMEOUT_MS` | SQLite lock wait in milliseconds, default `5000` |
 | `PENTAIA_SESSION_IDLE_TIMEOUT` | idle session timeout in seconds, default `1800` |
 | `PENTAIA_SESSION_ABSOLUTE_LIFETIME` | absolute session lifetime in seconds, default `43200` (never extended) |
 | `PENTAIA_PUBLIC_ORIGIN` | origin this deployment is reachable at, e.g. `https://pentaia.example.test` |
@@ -342,6 +345,89 @@ addresses become throttle identities.
 > header with `$remote_addr`. A proxy that passes a client-supplied `X-Forwarded-For`
 > through unchanged hands the client control of its own throttle bucket. Session cookies
 > stay `Secure` in every configuration; there is no insecure-cookie development switch.
+
+### Application store, sessions and accounting
+
+`PENTAIA_STORE_MODE` decides where the application's state lives.
+
+| Mode | Behaviour |
+| --- | --- |
+| `memory` (default) | Web sessions, login throttling and accounting live in the process. Nothing survives a restart. This is the development and test mode. |
+| `sqlite` | The durable store under `PENTAIA_DATA_DIR`. Sessions and lockouts survive a restart, and the accounting trail is persisted. **Requires** `PENTAIA_DATA_DIR`; without it the configuration is refused at startup. |
+
+The memory mode is not a way to skip accountability. An operation that marks its
+accounting event as *required* — a state-changing approval or execution — is refused when
+there is nowhere durable to record it, so choosing the memory mode cannot silently produce
+unaccounted security-critical actions.
+
+**Owner-only storage.** The directory is created `0700` and the database and its WAL
+sidecars are `0600`, applied explicitly rather than left to the process umask. The store
+refuses to open if the path is a symbolic link, is not a directory, is not writable, or
+fails its integrity check — and it never deletes or recreates an existing database, so a
+corrupt file is reported rather than quietly replaced.
+
+**Sessions.** Records are keyed by the SHA-256 digest of the session identifier, exactly as
+the in-memory store did, so **the raw cookie value is never written**: a copy of the
+database does not let anyone impersonate a signed-in user. Idle and absolute deadlines,
+logout, administrative revocation and fixation protection all behave as they did, and a
+session that has not expired is live again after a restart.
+
+**Login throttling.** Counters are durable, so a restart cannot be used to clear a
+lockout. Admission and counting are one transaction over the three counters, so a burst of
+concurrent attempts admits exactly the allowance. There are no reservations to abandon: a
+crash between admitting an attempt and learning its result leaves at most one extra
+counted attempt, which expires with its window.
+
+**Accounting.** One typed, append-only event stream. Every event is constructed as a typed
+object and serialized through an explicit field list — no free-form payload, no arbitrary
+mapping, no exception text. Each text field also has a grammar (a user id must look like
+`provider:username`, a session label like `sess-<16 hex>`, a proposal signature like 64 hex
+characters), so a value that is not shaped like the field it claims to be is refused.
+Passwords, bind passwords, shared secrets, API keys, SSH material, raw session identifiers,
+CSRF tokens, cookies, environment dumps, request bodies and tool output have no field to
+arrive through. The honest limit is that a value which *is* grammatically valid for its
+field is stored — a password shaped like a host name is indistinguishable from one — so
+the emitters are the control that matters, and the tests assert that the events the
+application really emits carry no credential.
+
+**Integrity.** Records are chained:
+
+```text
+record_hash = SHA256(previous_record_hash || canonical_event)
+```
+
+The hash is taken over the **stored canonical bytes**, never over a re-serialization of
+the query columns, so verification stays valid across code versions: a field added later
+changes only new records. A local anchor row holding the head hash and the record count is
+written in the same transaction as each append, so it can never drift from the chain.
+
+What verification detects, and what it does not:
+
+| Tampering | Detected |
+| --- | --- |
+| Editing a stored field, or a column, of any record | Yes |
+| Deleting or reordering a record in the middle | Yes |
+| Inserting a forged record | Yes |
+| Deleting the tail of the history | Yes, against the anchor |
+| Rewriting the history **and** its anchor consistently | **No** |
+| Replacing the whole database with a forgery | **No** |
+
+This is integrity verification and tamper evidence, not tamper-proof storage. A privileged
+attacker who can write the database can recompute a consistent chain; detecting that
+requires the head hash to be recorded somewhere they do not control. The verification
+primitive returns the head hash and the record count for exactly that purpose, and the
+local `pentaia-admin accounting verify` command planned in P4-14 will print them.
+
+**Failure behaviour.** An unusable store stops the application at startup with a one-line
+message rather than a traceback. At runtime a storage failure is refused for a required
+event, and an *optional* event that could not be recorded marks the accounting state
+`degraded` — visible to an authenticated operator as `accounting` on `/api/status`, as a
+category only, never as a database message or a path.
+
+**Backups must be WAL-aware.** Either stop the application first (its shutdown runs a
+checkpoint, so the main file is complete) or copy `pentaia.db`, `pentaia.db-wal` and
+`pentaia.db-shm` together. A main file copied on its own while the application is running
+can be missing recent commits.
 
 ### Active Directory (LDAPS) authentication
 

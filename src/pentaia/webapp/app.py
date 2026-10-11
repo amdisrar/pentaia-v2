@@ -27,6 +27,13 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from pentaia.appstore.connection import SqliteAppStore
+from pentaia.appstore.recorder import (
+    AccountingRecorder,
+    NullAccountingRecorder,
+    RepositoryAccountingRecorder,
+)
+from pentaia.appstore.repository import SqliteAccountingRepository
 from pentaia.webapp.api import API_ROUTERS
 from pentaia.webapp.api.login import (
     LOGIN_PATH,
@@ -41,6 +48,7 @@ from pentaia.webapp.auth.selection import build_auth_provider
 from pentaia.webapp.auth.throttle import InMemoryLoginThrottle, LoginThrottle
 from pentaia.webapp.config import WebAppConfig, load_webapp_config
 from pentaia.webapp.gui import mount_gui
+from pentaia.webapp.persistence import SqliteLoginThrottle, SqliteSessionStore
 from pentaia.webapp.sessions import InMemorySessionStore, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -63,17 +71,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info(
         "PentAiA web application starting host=%s port=%s docs_enabled=%s "
-        "auth_provider=%s public_origin=%s",
+        "auth_provider=%s public_origin=%s store=%s accounting=%s",
         config.host,
         config.port,
         config.docs_enabled,
         provider.name if provider is not None else "none",
         config.public_origin if config.public_origin is not None else "unset",
+        config.store.mode,
+        app.state.accounting.state.value,
     )
 
     try:
         yield
     finally:
+        # Release the database handle. A checkpoint runs first so the main file is
+        # complete for a copy taken after shutdown, which is the WAL-aware backup rule.
+        store_handle = getattr(app.state, "app_store", None)
+
+        if store_handle is not None:
+            store_handle.close()
+
         logger.info("PentAiA web application stopped")
 
 
@@ -101,6 +118,7 @@ def create_app(
     auth_provider: AuthProvider | None = None,
     login_throttle: LoginThrottle | None = None,
     pre_auth_tokens: PreAuthTokenStore | None = None,
+    accounting: AccountingRecorder | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     """Build the Phase 4 web application.
@@ -149,29 +167,68 @@ def create_app(
         openapi_url="/openapi.json" if resolved.docs_enabled else None,
     )
 
-    store = (
-        session_store
-        if session_store is not None
-        else InMemorySessionStore(
-            idle_timeout_seconds=resolved.session_idle_timeout,
-            absolute_lifetime_seconds=resolved.session_absolute_lifetime,
-            clock=moment,
-        )
+    # The durable store is opened and migrated before anything is served, so an unusable
+    # data directory, a corrupt database or a failed migration stops the application
+    # instead of surfacing on someone's first request.
+    app_store = (
+        SqliteAppStore.open(resolved.store) if resolved.store.durable else None
     )
 
-    throttle = (
-        login_throttle
-        if login_throttle is not None
-        else InMemoryLoginThrottle(
-            max_attempts=resolved.login_max_attempts,
-            window_seconds=resolved.login_window_seconds,
-            max_keys=resolved.login_max_keys,
-            clock=moment,
+    if app_store is not None:
+        app_store.migrate()
+
+    recorder = accounting
+
+    if recorder is None:
+        recorder = (
+            RepositoryAccountingRecorder(SqliteAccountingRepository(app_store))
+            if app_store is not None
+            else NullAccountingRecorder()
         )
-    )
+
+    store = session_store
+
+    if store is None:
+        store = (
+            SqliteSessionStore(
+                app_store,
+                idle_timeout_seconds=resolved.session_idle_timeout,
+                absolute_lifetime_seconds=resolved.session_absolute_lifetime,
+                recorder=recorder,
+                clock=moment,
+            )
+            if app_store is not None
+            else InMemorySessionStore(
+                idle_timeout_seconds=resolved.session_idle_timeout,
+                absolute_lifetime_seconds=resolved.session_absolute_lifetime,
+                clock=moment,
+            )
+        )
+
+    throttle = login_throttle
+
+    if throttle is None:
+        throttle = (
+            SqliteLoginThrottle(
+                app_store,
+                max_attempts=resolved.login_max_attempts,
+                window_seconds=resolved.login_window_seconds,
+                max_keys=resolved.login_max_keys,
+                clock=moment,
+            )
+            if app_store is not None
+            else InMemoryLoginThrottle(
+                max_attempts=resolved.login_max_attempts,
+                window_seconds=resolved.login_window_seconds,
+                max_keys=resolved.login_max_keys,
+                clock=moment,
+            )
+        )
 
     app.state.config = resolved
     app.state.session_store = store
+    app.state.accounting = recorder
+    app.state.app_store = app_store
     # Built once from validated configuration, so the trust decision is not remade from
     # raw strings on every request. An empty set trusts no peer's forwarded headers.
     app.state.trusted_proxies = TrustedProxySet.parse(resolved.trusted_proxies)
@@ -189,6 +246,7 @@ def create_app(
         provider=provider,
         throttle=throttle,
         session_store=store,
+        recorder=recorder,
         clock=moment,
     )
 

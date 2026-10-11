@@ -175,14 +175,16 @@ def test_the_safe_status_payload_is_typed_and_secret_free() -> None:
     assert payload.application == "pentaia"
     assert payload.authentication_provider is None
     assert payload.authentication_ready is False
+    assert payload.accounting == "disabled"
     # Pinning the field set is the point: a secret-bearing field cannot be added
     # without this test failing and the addition being reviewed deliberately. P4-07
-    # adds the two authentication fields, so the set is updated rather than the
-    # assertion removed.
+    # added the two authentication fields and P4-09 the accounting state, so the set is
+    # updated rather than the assertion removed.
     assert set(payload.model_dump()) == {
         "application",
         "authentication_provider",
         "authentication_ready",
+        "accounting",
     }
 
 

@@ -20,10 +20,12 @@ wrong.
 import ipaddress
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
+from pentaia.appstore.config import StoreConfig, load_store_config
 
 HOST_ENV = "PENTAIA_WEB_HOST"
 PORT_ENV = "PENTAIA_WEB_PORT"
@@ -117,6 +119,11 @@ class WebAppConfig:
     login_window_seconds: int = DEFAULT_LOGIN_WINDOW_SECONDS
     #: Upper bound on throttling state, so it cannot be grown without limit.
     login_max_keys: int = DEFAULT_LOGIN_MAX_KEYS
+    #: Application store configuration: memory (the default) or the durable SQLite
+    #: store, which requires ``PENTAIA_DATA_DIR``. ``PENTAIA_STORE_MODE=sqlite`` is the
+    #: explicit operational choice; the memory mode cannot be entered by accident and
+    #: records nothing durable.
+    store: StoreConfig = field(default_factory=StoreConfig)
     #: The origin this deployment is reachable at, as ``scheme://host:port``, or ``None``
     #: when it has not been declared. When set it is the only authority the browser's
     #: ``Origin`` header is compared against, so full scheme and port verification is
@@ -518,6 +525,7 @@ def load_webapp_config(environ: Mapping[str, str] | None = None) -> WebAppConfig
         _read(environ, LOGIN_MAX_KEYS_ENV, str(DEFAULT_LOGIN_MAX_KEYS))
     )
     public_origin = validate_public_origin(_read(environ, PUBLIC_ORIGIN_ENV, ""))
+    store = load_store_config(environ)
 
     return WebAppConfig(
         host=host,
@@ -531,4 +539,5 @@ def load_webapp_config(environ: Mapping[str, str] | None = None) -> WebAppConfig
         login_window_seconds=login_window_seconds,
         login_max_keys=login_max_keys,
         public_origin=public_origin,
+        store=store,
     )

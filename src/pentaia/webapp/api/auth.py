@@ -18,7 +18,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
+from pentaia.appstore.accounting import (
+    AccountingEvent,
+    AccountingEventType,
+    AccountingOutcome,
+)
 from pentaia.webapp.api.dependencies import (
+    accounting_recorder,
     require_authenticated_session,
     require_csrf,
     session_store,
@@ -49,6 +55,21 @@ async def logout(
     destruction is what ends the session.
     """
     invalidated = session_store(request).invalidate_label(session.label)
+
+    # The user action, distinct from the session record's destruction, which the store
+    # accounts for itself. Recorded as optional: a logout must not fail because the audit
+    # record could not be written.
+    accounting_recorder(request).record(
+        AccountingEvent(
+            event_type=AccountingEventType.LOGOUT,
+            outcome=(
+                AccountingOutcome.SUCCESS if invalidated else AccountingOutcome.FAILURE
+            ),
+            user_id=session.identity.user_id,
+            auth_source=session.identity.auth_source,
+            session_label=session.label,
+        )
+    )
 
     logger.info(
         "Web session logout session_label=%s invalidated=%s user_id=%s",

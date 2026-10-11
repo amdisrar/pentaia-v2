@@ -2,11 +2,11 @@
 
     uv run python -m pentaia.webapp
 
-Configuration is read and validated, and the authentication provider is selected and
-built, before the server binds. A bad setting or an unusable provider therefore fails
-immediately with a message naming the setting at fault instead of starting a
-misconfigured service; nothing is served and no other authentication mechanism is
-substituted. The bind address comes from the validated configuration rather than from
+Configuration is read and validated, the authentication provider is selected and built,
+and the application store is opened and migrated, all before the server binds. A bad
+setting, an unusable provider or an unusable store therefore fails immediately with a
+message naming the setting at fault instead of starting a misconfigured service; nothing
+is served, and no other authentication mechanism is substituted. The bind address comes from the validated configuration rather than from
 uvicorn's command-line defaults.
 """
 
@@ -15,6 +15,7 @@ import sys
 
 import uvicorn
 
+from pentaia.appstore.errors import StoreError
 from pentaia.logging_config import setup_logging
 from pentaia.webapp.app import create_app
 from pentaia.webapp.auth.base import ProviderError
@@ -33,7 +34,7 @@ def main() -> None:
     try:
         config = load_webapp_config()
         app = create_app(config)
-    except (ValueError, ProviderError) as exc:
+    except (ValueError, ProviderError, StoreError) as exc:
         # Written to stderr as well as the log: logging is file-only, and an operator
         # watching the terminal must see why the service did not come up. The messages
         # name the offending setting and never include credential material.
