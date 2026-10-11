@@ -56,6 +56,63 @@ def test_create_app_loads_configuration_when_none_is_supplied(
     assert create_app().state.config.port == 8123
 
 
+def test_create_app_without_configuration_ignores_ambient_store_and_provider() -> None:
+    """The suite must never reach the resources a developer configured in their ``.env``.
+
+    ``create_app()`` with no arguments loads the environment, so this asserts that the
+    autouse isolation fixture has pinned the store to memory, blanked the data directory,
+    and blanked the authentication provider. Without that fixture this fails whenever
+    ``.env`` selects ``PENTAIA_STORE_MODE=sqlite`` — the application would load that
+    configuration, open the database and migrate it — and it fails *hard* wherever the
+    configured directory is not writable.
+
+    The last assertion is the one that matters for the provider: ``create_app()`` builds a
+    provider during construction, so if the ambient setting survived, a real AD provider
+    would exist here and would reach the directory on the first authentication attempt.
+    Nothing in this test reads the developer's configured values: the point is that they
+    cannot be reached.
+    """
+    from pentaia.webapp.config import load_webapp_config
+
+    config = load_webapp_config()
+
+    assert config.store.mode == "memory"
+    assert config.store.data_dir is None
+    assert config.store.durable is False
+    assert config.store.database_path is None
+    assert config.auth_provider is None
+
+    app = create_app()
+
+    assert app.state.config.store.durable is False
+    assert app.state.app_store is None, "no database handle may be opened"
+    assert app.state.auth_provider is None, "no ambient provider may be constructed"
+
+
+def test_a_test_may_still_choose_its_own_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixture pins the ambient default; a test can override it deliberately.
+
+    This is the other half of the isolation contract: the fixture must not make it
+    impossible to exercise environment-driven behaviour, only to inherit it by accident.
+    Construction does not contact the directory — the bind happens on the first
+    authentication attempt — so this stays offline.
+    """
+    from pentaia.webapp.auth.ad import HOST_ENV as AD_HOST_ENV
+    from pentaia.webapp.config import AUTH_PROVIDER_ENV
+
+    monkeypatch.setenv(AUTH_PROVIDER_ENV, "ad")
+    monkeypatch.setenv(AD_HOST_ENV, "dc.invalid.test")
+
+    app = create_app()
+
+    assert app.state.config.auth_provider == "ad"
+    assert app.state.auth_provider is not None
+    assert app.state.auth_provider.name == "ad"
+    assert app.state.app_store is None
+
+
 def test_lifespan_logs_startup_and_shutdown(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
