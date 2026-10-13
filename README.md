@@ -5,8 +5,15 @@ with LangChain, LangGraph, Google Gemini, and a remote Kali Linux execution
 environment. An LLM plans and interprets; a code-owned wrapper layer decides what is
 actually allowed to run.
 
-**Phases 1–3 are complete and verified end to end in an isolated private lab.**
-Phase 4 is now in progress. The FastAPI web foundation (P4-02) and initial web GUI shell (P4-03) are complete; identity/session work continues in P4-04.
+**Phases 1–3 are complete and verified end to end in an isolated private lab.** Phase 4 is in progress.
+
+## Progress summary (October 2026)
+
+- **Core agent — complete:** LangGraph/Gemini orchestration; code-controlled Nmap and Nuclei discovery through Kali SSH; normalized findings; and human-approved Metasploit validation with signature-bound approval, audit events, and operator session handoff.
+- **Web foundation — implemented:** FastAPI health and status endpoints, web GUI shell, and browser sign-in backed by server-side sessions.
+- **Authentication and session security — implemented:** Active Directory over certificate-validated LDAPS, fail-closed provider selection, protected session cookies, CSRF and origin checks, login throttling, and trusted-proxy-aware client addresses. A dedicated helper supports real-AD validation in the lab.
+- **Persistence and accounting — implemented:** Optional SQLite storage keeps sessions and login lockouts across restarts, with typed append-only accounting events and hash-chain integrity checks. In-memory mode remains available for development.
+- **Still to complete:** Connect authenticated web conversations to LangGraph, bring human approvals and accounting views into the GUI, add operational/admin recovery features, and finish end-to-end verification and deployment documentation. RADIUS work is intentionally deferred.
 
 ## Architecture
 
@@ -509,7 +516,7 @@ uv run pentaia session list       # held Phase 3 consoles
 uv run python -m pentaia.webapp   # Phase 4 FastAPI web application
 ```
 
-The Phase 4 GUI currently provides the shell only; enterprise authentication, real web sessions, conversations, accounting, and approval integration are delivered by later Phase 4 issues.
+The Phase 4 GUI supports browser sign-in and authenticated sessions. Web conversations, approval integration, accounting views, and administrative recovery workflows are still to be completed.
 
 A typical Phase 3 prompt:
 
